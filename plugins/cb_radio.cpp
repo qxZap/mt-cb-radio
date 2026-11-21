@@ -1019,7 +1019,7 @@ static std::string stateJson() {
     for (int i = 0; i < 64; i++) { snprintf(b, sizeof b, "%s%.3f", i ? "," : "", scope[i]); j += b; }
     return j + "]}";
 }
-static void apply(const std::string& q) {  // k=v&k=v
+static bool apply(const std::string& q) {  // -> the radio was retuned (the click gets its beep)  // k=v&k=v
     std::lock_guard<std::mutex> g(mu);
     int r = q.find("rig=ht") != std::string::npos ? HT : CB;  // the rig the panel's controls act on
     int& khz = rig[r].khz;
@@ -1049,8 +1049,10 @@ static void apply(const std::string& q) {  // k=v&k=v
         else if (k == "spkDev") { spkDev = fromUrl(v); reopenOut = true; }
         at = amp + 1;
     }
+    bool tuned = khz != was;
     if (khz != was) { radioChanged(r); notice(label(khz) + (r == HT ? "  (handheld)" : "")); }
     saveSettings();
+    return tuned;
 }
 static void serve(SOCKET c) {
     char buf[4096]; int n = recv(c, buf, sizeof buf - 1, 0);
@@ -1059,7 +1061,7 @@ static void serve(SOCKET c) {
     std::string req(buf), path = req.substr(req.find(' ') + 1); path = path.substr(0, path.find(' '));
     std::string body, type = "application/json";
     if (path.rfind("/state", 0) == 0) body = stateJson();
-    else if (path.rfind("/set?", 0) == 0) { bool beep = path.find("ch=") != std::string::npos; apply(path.substr(5)); body = stateJson(); if (beep) localBeep({1750, 1750}); }
+    else if (path.rfind("/set?", 0) == 0) { bool tuned = apply(path.substr(5)); body = stateJson(); if (tuned) localBeep({1750, 1750}); }  // a refused click makes no sound
     else { body.assign((const char*)PANEL, sizeof PANEL); type = "text/html; charset=utf-8"; }
     std::string head = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n";
     send(c, head.data(), (int)head.size(), 0); send(c, body.data(), (int)body.size(), 0);

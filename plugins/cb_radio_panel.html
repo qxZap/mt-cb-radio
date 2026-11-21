@@ -120,10 +120,10 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 .dimmed .face>*:not(.screw):not(.off){filter:grayscale(1) brightness(.45)}
 /* the handheld */
 .htwrap{display:flex;justify-content:center}
-.ht{position:relative;width:min(100%,360px);margin-top:56px}
+.ht{position:relative;width:min(100%,360px);margin-top:96px}
 .ht .ant{position:absolute;left:64px;top:-56px;width:18px;height:70px;border-radius:9px 9px 4px 4px;background:linear-gradient(90deg,#111,#3a3a3e,#111);box-shadow:0 2px 4px #000}
 .ht .ant::before{content:"";position:absolute;left:3px;top:-6px;width:12px;height:12px;border-radius:50%;background:#1a1a1c}
-.ht .top{position:absolute;right:40px;top:-30px;display:flex;gap:12px;align-items:flex-end}
+.ht .top{position:absolute;right:26px;top:-86px;display:flex;gap:14px;align-items:flex-end;z-index:3}  /* knobs above the body, not behind it */
 .ht .led2{width:12px;height:12px;border-radius:50%;background:#220707;border:2px solid #000;margin-bottom:8px}
 .ht .led2.tx{background:#ff2b14;box-shadow:0 0 10px #ff2b14}.ht .led2.rx{background:#3dff6a;box-shadow:0 0 10px #3dff6a}
 .ht .body{position:relative;border-radius:26px 26px 34px 34px;padding:22px 22px 26px;background:
@@ -147,7 +147,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 .ht .keys2 .o{color:#ff8a1e}
 .ht .knobs{justify-content:center}
 /* a radio you are not at: heard, not tuned */
-.locked .tune,.locked #kCh,.locked .fin,.locked #tPw,#chansCard.locked .chb,#htKeys.locked{pointer-events:none;opacity:.32;filter:grayscale(1)}
+.locked .tune,.locked #kCh,.locked .fin,.locked #tPw,#chansCard.locked .chb,#htKeys.locked,.knob.off2{pointer-events:none;opacity:.32;filter:grayscale(1)}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -207,7 +207,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 </div>
 <div id="htView" hidden><div class="htwrap"><div class="ht">
   <span class="ant" aria-hidden="true"></span>
-  <div class="top"><span class="led2" id="htLed"></span><div class="knob" id="kHtVol" tabindex="0" role="slider" aria-label="Volume"></div></div>
+  <div class="top"><span class="led2" id="htLed"></span><div class="knob" id="kHtCh" tabindex="0" role="slider" aria-label="Handheld channel"></div><div class="knob" id="kHtVol" tabindex="0" role="slider" aria-label="Volume"></div></div>
   <div class="body"><span class="ptt" id="htPtt" aria-hidden="true"></span>
     <div class="brand2">MOTORTOWN <b>HT-3</b></div>
     <div class="grill" aria-hidden="true"></div>
@@ -343,6 +343,7 @@ for(const i of [0,1,2])$("tx"+i).onclick=()=>set("txmode="+i);
 $("tPw").onclick=()=>set("rig=cb&power="+(st.cb.on?0:1));
 /* the handheld: keypad, volume, its own display */
 const kHtVol=knob($("kHtVol"),"Vol",0,150,5,x=>x+"%",debounce(x=>set("vol="+x),150),48);
+const kHtCh=knob($("kHtCh"),"Ch",1,40,1,x=>"CH "+x,debounce(x=>set("rig=ht&ch="+x),120),48);
 let entry="";
 const KEYS=[["&#9650;","up","o"],["&#9660;","dn","o"],["&minus;5k","m5","o"],["+5k","p5","o"],["1","1"],["2","2"],["3","3"],["PWR","pw","o"],["4","4"],["5","5"],["6","6"],["SQL+","sq+"],
  ["7","7"],["8","8"],["9","9"],["SQL&minus;","sq-"],["CLR","clr","o"],["0","0"],["ENT","ent","o"],["CHK","chk"]];
@@ -358,7 +359,7 @@ function htKey(k){if(/^\d$/.test(k)){if(entry.length<5)entry+=k;draw();return}
 function drawHt(s,R){const on=R.on&&R.avail,rx=(s.rx||[]).length?Math.max(...s.rx):0;
  $("htLcd").classList.toggle("dark",!on);
  $("htLed").className="led2"+(on&&s.tx&&(s.txOn&2)?" tx":on&&rx>0?" rx":"");$("htPtt").classList.toggle("on",!!(s.tx&&(s.txOn&2)));
- if(!kHtVol.busy())kHtVol.show(s.vol);
+ if(!kHtVol.busy())kHtVol.show(s.vol);if(!kHtCh.busy())kHtCh.show(R.ch||1);$("kHtCh").classList.toggle("off2",!(R.avail));
  [...$("htBars").children].forEach((e,i)=>e.classList.toggle("on",on&&i<Math.ceil(rx*5)));
  $("htTx").textContent=!on?"":s.tx&&(s.txOn&2)?"TX":rx>0?"RX":s.parrot?"CHK":"";
  if(entry){$("htBig").innerHTML=entry.length<=2?`<small>CH</small>${entry}_`:`<small></small>${(entry+"_____").slice(0,2)}.${(entry+"_____").slice(2,5)}`;$("htFq").textContent="ENTER";$("htName").textContent="ENT to tune, CLR to cancel"}
