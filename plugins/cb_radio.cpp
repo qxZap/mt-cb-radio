@@ -952,6 +952,8 @@ static void speak(bool on) {
         keybd_event((BYTE)kVoice, (BYTE)MapVirtualKeyW(kVoice, MAPVK_VK_TO_VSC), on ? 0 : KEYEVENTF_KEYUP, 0);
     } else if (fSpeak && api->game_thread_ready() && !api->stopping()) api->run_on_game_thread(speakOn, on ? (void*)1 : nullptr);
 }
+static volatile DWORD focusAt;  // when to click the shown in-game window awake (0: no)
+static void clickAwake();
 static void keyThread() {
     HWAVEIN wi = nullptr;
     static int16_t cap[8][FRAME];
@@ -1006,6 +1008,7 @@ static void keyThread() {
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
+        if (focusAt && (int)(GetTickCount() - focusAt) >= 0) { focusAt = 0; if (overlayOn) clickAwake(); }
         // Esc closes the in-game panel on its RELEASE: closing on the press gave the keys back to the game while Esc was
         // still down, and the game opened its own menu too (11-21)
         static bool escDown, escClose;
@@ -1350,7 +1353,7 @@ static void inputMode(bool ui) {
         if (f) {
             unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), fl = off(f, "bFlushInput");
             if (o >= 0) memcpy(a + o, &pc, 8);
-            if (ow >= 0) memcpy(a + ow, &overlay, 8);
+            if (ow >= 0) memcpy(a + ow, overlayWeb ? &overlayWeb : &overlay, 8);  // the browser itself: the page gets the keys
             if (fl >= 0) a[fl] = 1;
             api->process_event(lib, f, a);
         } else if ((f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary"))) {
@@ -1380,6 +1383,24 @@ static void overlayUp(void*) {
     inputMode(true);
     overlayOn = true;
     overlayAt = GetTickCount();  // its page checked again while it shows
+    focusAt = GetTickCount() + 150;  // the key thread clicks it awake (below)
+}
+// Shown, the browser has no focus and no cursor until it is clicked (11-22): one click on the window's top-left corner,
+// the page's bare background, then the cursor to the middle of the window. Key thread, not the game thread.
+static void clickAwake() {
+    HWND h = gameWindow();
+    RECT r;
+    if (!h || GetForegroundWindow() != h || !GetClientRect(h, &r)) return;
+    POINT tl{0, 0}; ClientToScreen(h, &tl);
+    double w = r.right * panelW / 100, hh = r.bottom * panelH / 100;
+    int x0 = tl.x + (int)((r.right - w) / 2), y0 = tl.y + (int)((r.bottom - hh) / 2);
+    SetCursorPos(x0 + 4, y0 + 4);
+    INPUT in[2] = {};
+    in[0].type = in[1].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN; in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(2, in, sizeof(INPUT));
+    Sleep(30);
+    SetCursorPos(x0 + (int)(w / 2), y0 + (int)(hh / 2));
 }
 static void openPanel() {    // the panel key: the in-game panel on and off, or the outside browser
     if (!inGamePanel) { openBrowser(); return; }
