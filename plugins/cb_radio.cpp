@@ -174,10 +174,12 @@ static std::map<int64_t, VehRadio> vehRadio;          // under mu; [Vehicles] id
 static std::map<uint64_t, int64_t> peerVeh;           // under mu: the vehicle each plugin player sits in
 static std::atomic<bool> helloNow{false};
 static void saveVeh(int64_t id, const VehRadio& r) {
+    if (id < 0) return;  // a vehicle with no id of its own (below): nothing to keep
     wchar_t k[24], v[32]; swprintf(k, 24, L"%lld", (long long)id); swprintf(v, 32, L"%d,%u", r.khz, r.ver);
     iniSet(L"cb_radio.ini", L"Vehicles", k, v, true);
 }
 static bool loadVeh(int64_t id, VehRadio& r) {
+    if (id < 0) return false;
     wchar_t k[24]; swprintf(k, 24, L"%lld", (long long)id);
     std::wstring v = iniGet(L"cb_radio.ini", L"Vehicles", k);
     int a = 0, b = 0; unsigned c = 0;
@@ -499,6 +501,10 @@ static void scanWorld() {
     }
     int64_t id = 0;
     if (in && oVehId >= 0) rd(in + oVehId, &id, 8);
+    // On a dedicated server some vehicles (jobs, rentals) carry no id: -1 for all of them, so everyone in one read as
+    // sitting in the same cab and every CB was muted as heard in person (11-22). Such a vehicle gets an id of this
+    // PC's own, from its object: never equal to another player's, never saved; its passengers do not share its CB.
+    if (in && id <= 0) id = -(int64_t)((in >> 4) & 0x3fffffffffffLL) - 2;
     // on foot: the CB Handheld in the hand (its name enters the pool once the item table has loaded)
     static int cbName;
     if (!cbName) cbName = api->name_index("CB_Handheld");
