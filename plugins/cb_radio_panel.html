@@ -189,6 +189,9 @@ body.simple .ht .keys2{grid-template-columns:repeat(3,minmax(0,1fr))}
 button.flash{animation:flash .35s ease-out}
 @keyframes flash{0%{color:#7dff8a;border-color:#7dff8a;box-shadow:0 0 12px #7dff8a66}100%{}}
 .seg2 button[aria-pressed=true]{color:#7dff8a}
+.chans .towns{grid-column:1/-1;flex-wrap:wrap;justify-self:start}
+.chans .townsvc{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:7px}
+.chans .townsvc .chb .n{font-size:15px}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -276,7 +279,13 @@ const CH=[0,26965,26975,26985,27005,27015,27025,27035,27055,27065,27075,27085,27
 const NAMES=["","Jeju","Ara","Gangjung","Gapa","Seongsan","Hallim","Gwangjin","Arini","Emergency","Police","Fire","Ambulance","Mountain rescue",
  "Towing & recovery","Roadside help","Marine calling","Harbours & docks","Ferries & ships","Truckers","Heavy haul & escort","Taxi & bus","Delivery & mail",
  "Garbage & utilities","Construction","Farming","Off-road","Fishing","Diving & subs","Air","Convoy"];
-const GROUPS=[["Towns",[1,2,3,4,5,6,7,8]],["Emergency & help",[9,10,11,12,13,14,15]],["Water",[16,17,18,27,28]],["Road & work",[19,20,21,22,23,24,25,26,29,30]]];
+// Common channels first (the 40 CB channels), then every town's own services above channel 40 -- the plugin's plan too:
+// town t, service v at 27.455 + 0.090 t + 0.010 v MHz
+const GROUPS=[["Common",[9,10,11,12,13,14,15,19,20,21,22,23,24,25,26,29,30]],["Water",[16,17,18,27,28]],["Towns",[1,2,3,4,5,6,7,8]]];
+const TOWNS=["Jeju","Ara","Gangjung","Gapa","Seongsan","Hallim","Gwangjin","Arini"];
+const SERVICES=["Police","Fire","Ambulance","Mountain rescue","Towing","Harbour","Diving & subs","Taxi & bus","Delivery"];
+const townKhz=(t,v)=>27455+90*t+10*v;
+function nameOf(k){const c=CH.indexOf(k);if(c>0&&c<=30)return NAMES[c];const d=k-27455;if(d<0||d%10)return "";const t=Math.floor(d/90),v=d%90/10;return t<8&&v<9?TOWNS[t]+" "+SERVICES[v]:""}
 const LO=25615,HI=28305;
 let st=null,busy=false,tuneTo=null,tuneAt=0,view="cb",lastLoc=null;
 const setR=q=>set("rig="+view+"&"+q);  // a control of the radio showing
@@ -336,8 +345,18 @@ const kMic=knob($("kMic"),"Mic gain",10,300,5,x=>x+"%",debounce(x=>set("mic="+x)
 const kPr=knob($("kPr"),"Check at",1,100,1,x=>"S-"+sUnits(x/100),debounce(x=>set("parrotS="+x),150));
 
 /* channel buttons */
+function chanBtn(box,label,name,k,q,tip){const b=document.createElement("button");b.className="chb";b.dataset.khz=k;b.title=(tip||name)+" ("+mhz(k)+" MHz)";
+ b.innerHTML=`<span class="n">${label}</span><span class="d">${esc(name)}</span>`;b.onclick=()=>setR(q);box.append(b)}
 for(const [g,list] of GROUPS){const h=document.createElement("h3");h.textContent=g;$("chans").append(h);
- for(const c of list){const b=document.createElement("button");b.className="chb";b.dataset.ch=c;b.title="Channel "+c+" - "+NAMES[c]+" ("+mhz(CH[c])+" MHz)";b.innerHTML=`<span class="n">${String(c).padStart(2,"0")}</span><span class="d">${esc(NAMES[c])}</span>`;b.onclick=()=>setR("ch="+c);$("chans").append(b)}}
+ for(const c of list)chanBtn($("chans"),String(c).padStart(2,"0"),NAMES[c],CH[c],"ch="+c)}
+let town=0;  // the town whose own channels show: a tab per town, its nine services under it
+{const h=document.createElement("h3");h.textContent="By town";$("chans").append(h);
+ const tabs=document.createElement("div");tabs.className="seg2 towns";tabs.setAttribute("role","group");tabs.setAttribute("aria-label","Town");
+ const svc=document.createElement("div");svc.className="townsvc";
+ const show=ti=>{town=ti;[...tabs.children].forEach((b,i)=>b.setAttribute("aria-pressed",i==ti));svc.textContent="";
+  SERVICES.forEach((v,vi)=>chanBtn(svc,mhz(townKhz(ti,vi)),v,townKhz(ti,vi),"khz="+townKhz(ti,vi),TOWNS[ti]+" "+v));if(st)draw()};
+ TOWNS.forEach((t,ti)=>{const b=document.createElement("button");b.textContent=t;b.title=t+"'s own police, fire, ambulance and more";b.onclick=()=>show(ti);tabs.append(b)});
+ $("chans").append(tabs,svc);show(0)}
 const chName=c=>NAMES[c]||"";
 
 function draw(){if(!st)return;
@@ -367,13 +386,13 @@ function draw(){if(!st)return;
  needle(s.tx?s.txLevel:rx*0.6+(rx>0.85?(rx-0.85)/0.15*0.4:0));$("mLab").textContent=s.tx?"RF POWER":"SIGNAL";
  const fl={fRx:rx>0&&!s.tx,fTx:!!s.tx,fRb:!!s.roger,fSq:s.sq>0,fPr:!!s.parrot,fVeh:!!s.veh,fHh:!!(st.ht.avail&&st.ht.on),fGv:!!s.gamevoice};
  for(const k in fl)$(k).classList.toggle("on",fl[k]);
- $("who").textContent=s.tx?"TRANSMITTING":(s.ch?chName(s.ch).toUpperCase():"");
+ $("who").textContent=s.tx?"TRANSMITTING":nameOf(s.khz).toUpperCase();
  if(!kCh.busy())kCh.show(s.ch||1);if(!kVol.busy())kVol.show(s.vol);if(!kSq.busy())kSq.show(s.sq);if(!kMic.busy())kMic.show(s.mic);if(!kPr.busy())kPr.show(s.parrotS);
  $("kPr").classList.toggle("nouse",!s.parrot);
  for(const [id,on] of [["tRb",s.roger],["tPr",s.parrot],["tGv",s.gamevoice]])$(id).setAttribute("aria-pressed",on?"true":"false");
  if(tuneTo===null)$("band").value=k;$("ptr").style.left=((k-LO)/(HI-LO)*100)+"%";
  if(document.activeElement!==$("fType"))$("fType").value=mhz(k);
- document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.ch===s.ch));
+ document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.khz===s.khz));
  $("stat").innerHTML=Rg.avail?`range <b>${Rg.range||0} km</b>`:"";
  const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No ham radio yet: buy one at the tech store and take it out once (its hotbar number). It stays with you from then on, in vehicles too.":"";
  $("warn").hidden=!w;$("warn").textContent=w;
@@ -437,7 +456,7 @@ function drawHt(s,R){const on=R.on&&R.avail,rx=(s.rx||[]).length?Math.max(...s.r
  [...$("htBars").children].forEach((e,i)=>e.classList.toggle("on",on&&i<Math.ceil(rx*5)));
  $("htTx").textContent=!on?"":s.tx&&(s.txOn&2)?"TX":rx>0?"RX":s.parrot?"CHK":"";
  if(entry){$("htBig").innerHTML=entry.length<=2?`<small>CH</small>${entry}_`:`<small></small>${(entry+"_____").slice(0,2)}.${(entry+"_____").slice(2,5)}`;$("htFq").textContent="ENTER";$("htName").textContent="ENT to tune, CLR to cancel"}
- else{$("htBig").innerHTML=R.ch?`<small>CH</small>${String(R.ch).padStart(2,"0")}`:`<small></small>${mhz(R.khz)}`;$("htFq").textContent=R.ch?mhz(R.khz):"OFF CHANNEL";$("htName").textContent=R.ch?chName(R.ch):""}
+ else{$("htBig").innerHTML=R.ch?`<small>CH</small>${String(R.ch).padStart(2,"0")}`:`<small></small>${mhz(R.khz)}`;$("htFq").textContent=R.ch?mhz(R.khz):nameOf(R.khz)?"TOWN":"OFF CHANNEL";$("htName").textContent=nameOf(R.khz)}
  $("htRange").textContent=(R.range||3)+" KM";
  if(!R.avail){$("htBig").innerHTML="<small></small>----";$("htFq").textContent="";$("htName").textContent="Take the ham radio out once";$("htRange").textContent=""}}
 $("fUp").onclick=()=>setR("step=1");$("fDn").onclick=()=>setR("step=-1");

@@ -16,7 +16,8 @@
 //
 // Range goes with the rig (the user, 2026-11-21): the handheld 3 km; a vehicle by its weight, 10 km up to 2 t, 15 to
 // 5 t, 20 to 12 t, 25 above; a boat 20 km, a ship (over 50 t) 60 km so ships talk across the map. A link reaches as far
-// as the smaller of the two rigs: every packet carries its sender's range, so a car never hears past its 10 km.
+// as the SENDER's rig: every packet carries its sender's range (a ship's 1000 km over is heard by a car 500 km away;
+// the car answers only from within its own 10 km).
 //
 // Transport: Steam's ISteamNetworkingMessages, peer to peer by Steam id, on a channel of its own (the game's net driver
 // uses Steam *sockets*, not messages, so nothing of the game's is touched). Every few seconds a hello goes to every
@@ -40,8 +41,7 @@
 //             or a Windows key code (36); GameVoice=G, the game's own voice key held while you talk (empty = none)
 //   [Panel]   Port=8095                     the browser panel's port (the next free one if it is taken)
 //   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=30 Ship=100 (tugs) BigShip=1000 (tankers,
-//             container ships, ferries)   km, this rig's own (a link uses
-//             the smaller of the two rigs)
+//             container ships, ferries)   km, how far this rig is heard
 //   [Radio]   Frequency (kHz), Volume, Squelch, MicGain, RogerBeep, GameVoice, Transmit (0 CB, 1 handheld, 2 both),
 //             CBOn, HandheldOn, MicDevice, SpeakerDevice
 //   [Vehicles] each vehicle's CB frequency, by vehicle id
@@ -357,10 +357,13 @@ static void showNotices(void*) {
     }
 }
 static std::string presetName(int ch);
+static std::string townName(int k);
 static std::string label(int k) {  // "CB 19  27.185 MHz  -  Truckers", or "27.190 MHz" between channels
     char b[32]; snprintf(b, sizeof b, "%d.%03d MHz", k / 1000, k % 1000);
     int c = chOf(k);
-    return c ? "CB " + std::to_string(c) + "  " + b + presetName(c) : std::string("CB  ") + b;
+    if (c) return "CB " + std::to_string(c) + "  " + b + presetName(c);
+    std::string n = townName(k);
+    return std::string("CB  ") + b + (n.empty() ? "" : "  -  " + n);
 }
 
 static bool resolveWorld() {
@@ -774,7 +777,7 @@ static void received(uint64_t from, const Packet& p, int n) {
         if (!(p.flags & F_REPLY)) { Packet r = p; r.flags = F_REPLY; r.rk = 0; r.x = (float)myX; r.y = (float)myY; fillHello(r); sendTo(from, r, HELLO); }  // answer once
         return;
     }
-    // which of our rigs hears it: tuned within 5 kHz (off-tune is weak and garbled), in range of the smaller of the two
+    // which of our rigs hears it: tuned within 5 kHz (off-tune is weak and garbled), in range of the sender's rig
     // rigs, and loudest where we stand
     float s = 0, gain = 0; int df = 0;
     for (int r = 0; r < 2; r++) {
@@ -782,7 +785,9 @@ static void received(uint64_t from, const Packet& p, int n) {
         int d = abs((int)p.key - g.khz);
         if (!g.on || !g.avail || g.hear <= 0 || d > 5) continue;
         if (r == CB && gameVoice && myVeh && inVehicle) { auto pv = peerVeh.find(from); if (pv != peerVeh.end() && pv->second == myVeh) continue; }  // in our cab: heard in person
-        double link = fmin(g.range, p.rk ? p.rk : 10), km2 = hypot(p.x - g.x, p.y - g.y) / 100000.0;
+        // the sender's range decides (the user, 11-21): a 1000 km ship is heard 1000 km out; a car's 10 km set
+        // reaches the ship only within 10 km -- there the two can talk
+        double link = p.rk ? p.rk : 10, km2 = hypot(p.x - g.x, p.y - g.y) / 100000.0;
         float sr = signalAt(km2, link) * (d ? 0.45f : 1);
         if (sr * g.hear > s * gain) { s = sr; gain = g.hear; df = d; km = km2; }
     }
@@ -992,6 +997,16 @@ static const char* CHNAME[41] = {"", "Jeju", "Ara", "Gangjung", "Gapa", "Seongsa
     "Emergency", "Police", "Fire", "Ambulance", "Mountain rescue", "Towing & recovery", "Roadside help", "Marine calling",
     "Harbours & docks", "Ferries & ships", "Truckers", "Heavy haul & escort", "Taxi & bus", "Delivery & mail",
     "Garbage & utilities", "Construction", "Farming", "Off-road", "Fishing", "Diving & subs", "Air", "Convoy"};
+// Every town's own services, above channel 40 (the user, 11-21: "the police in Arini, the ambulance in Gapa"): town t,
+// service v at 27.455 + 0.090 t + 0.010 v MHz -- 8 towns x 9 services, 27.455-28.165. Same plan as the panel's.
+static const char* TOWNS[8] = {"Jeju", "Ara", "Gangjung", "Gapa", "Seongsan", "Hallim", "Gwangjin", "Arini"};
+static const char* SERVICES[9] = {"Police", "Fire", "Ambulance", "Mountain rescue", "Towing", "Harbour", "Diving & subs", "Taxi & bus", "Delivery"};
+static std::string townName(int k) {
+    int d = k - 27455;
+    if (d < 0 || d % 10) return "";
+    int t = d / 90, v = d % 90 / 10;
+    return t < 8 && v < 9 ? std::string(TOWNS[t]) + " " + SERVICES[v] : "";
+}
 static std::string presetName(int ch) {
     return ch >= 1 && ch <= 30 ? std::string("  -  ") + CHNAME[ch] : "";
 }
@@ -1116,6 +1131,8 @@ static void openPanel() {
 static bool selfCheck() {
     for (int v = -32000; v <= 32000; v += 97) { int d = ulawDec(ulawEnc((int16_t)v)) - v; if (abs(d) > 1100 || (abs(v) < 200 && abs(d) > 20)) return false; }
     if (chKhz(19) != 27185 || chKhz(9) != 27065 || chKhz(40) != 27405 || chKhz(23) != 27255 || chOf(27190) || chOf(27185) != 19) return false;
+    if (townName(27455) != "Jeju Police" || townName(27455 + 90 * 3 + 20) != "Gapa Ambulance" || townName(27455 + 90 * 7 + 80) != "Arini Delivery"
+        || !townName(27450).empty() || !townName(27455 + 90 * 8).empty() || !townName(27460).empty()) return false;
     if (snapKhz(27187) != 27185 || snapKhz(27188) != 27190 || snapKhz(1) != KHZ_MIN || snapKhz(99999) != KHZ_MAX) return false;
     if (parseKey(L"Ctrl+End").vk != VK_END || !parseKey(L"ctrl + end").ctrl || parseKey(L"Home").vk != VK_HOME || parseKey(L"36").vk != 36
         || parseKey(L"F5").vk != VK_F5 || parseKey(L"g").vk != 'G' || parseKey(L"Numpad3").vk != VK_NUMPAD3 || parseKey(L"nope").vk) return false;
