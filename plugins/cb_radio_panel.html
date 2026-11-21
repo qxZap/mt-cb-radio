@@ -76,7 +76,7 @@ kbd{font-family:"Share Tech Mono",monospace;background:#2d2a25;border:1px solid 
     <div class="lcd">
       <div class="row"><div class="ch" id="ch"><span class="ghost">88</span></div>
         <div class="side"><div class="freq" id="freq">--.--- MHz</div><div class="tag" id="code">PC OFF</div>
-          <div class="flags"><span id="fRx">RX</span><span id="fTx" class="tx">TX</span><span id="fRb">RB</span><span id="fSq">SQ</span><span id="fPr">CHK</span></div></div></div>
+          <div class="flags"><span id="fRx">RX</span><span id="fTx" class="tx">TX</span><span id="fRb">RB</span><span id="fSq">SQ</span><span id="fPr">CHK</span><span id="fVeh">VEH</span></div></div></div>
       <div class="meter"><div class="lab"><span>S 1</span><span>3</span><span>5</span><span>7</span><span>9</span><span>+20</span><span>+40</span></div>
         <div class="bars" id="bars"></div><div class="lab"><span>RF / PWR</span><span id="who">&nbsp;</span></div></div>
       <canvas id="scope" width="640" height="70" aria-label="Received audio"></canvas>
@@ -90,7 +90,7 @@ kbd{font-family:"Share Tech Mono",monospace;background:#2d2a25;border:1px solid 
       <div class="knob"><label for="code2">Privacy</label><select id="code2" aria-label="Privacy code"></select><output></output></div>
       <div class="knob"><label for="micDev">Mic</label><select id="micDev" aria-label="Microphone"></select><output></output></div>
       <div class="knob"><label for="spkDev">Speaker</label><select id="spkDev" aria-label="Speaker"></select><output></output></div>
-      <div class="btns"><button id="rb">Roger beep</button><button id="hh">Handheld on foot</button><button id="pr">Radio check</button></div>
+      <div class="btns"><button id="rb">Roger beep</button><button id="hh">Handheld on foot</button><button id="pr">Radio check</button><button id="gv">Game voice too</button></div>
       <div class="knob" id="prRow"><label for="prS">Check at</label><input type="range" id="prS" min="1" max="100"><output id="prSO"></output></div>
       <button class="ptt" id="ptt">PUSH TO TALK</button>
     </div>
@@ -144,7 +144,7 @@ function draw(){if(!st)return;const s=st;
  $("volO").value=s.vol;$("sqO").value=s.sq;$("micO").value=s.mic+"%";
  if(document.activeElement!==$("prS"))$("prS").value=s.parrotS;$("prSO").value="S"+sUnits(s.parrotS/100);$("prRow").hidden=!s.parrot;
  if(document.activeElement!==$("code2"))$("code2").value=s.code;
- $("rb").classList.toggle("lit",!!s.roger);$("hh").classList.toggle("lit",!!s.handheld);$("pr").classList.toggle("lit",!!s.parrot);$("ptt").classList.toggle("on",!!s.tx);
+ $("rb").classList.toggle("lit",!!s.roger);$("hh").classList.toggle("lit",!!s.handheld);$("pr").classList.toggle("lit",!!s.parrot);$("ptt").classList.toggle("on",!!s.tx);$("gv").classList.toggle("lit",!!s.gamevoice);$("fVeh").classList.toggle("on",!!s.veh);
  $("stat").innerHTML=`<b>${esc(s.me||"-")}</b> &middot; ${s.steam?"steam ok":"no steam"} &middot; ${s.inSession} others in session &middot; range ${s.range} km`;
  const w=!s.inVeh&&!s.handheld&&!s.parrot?"You are on foot: the rig is in your vehicle. Get in, switch on Handheld, or use Radio check.":!s.steam?"Steam networking is not up: only the radio check works.":"";
  $("warn").hidden=!w;$("warn").textContent=w;
@@ -166,7 +166,7 @@ $("code2").onchange=e=>set("code="+e.target.value);
 function devs(id,list,cur){const sel=$(id),sig=JSON.stringify([list,cur]);if(sel.dataset.sig===sig||document.activeElement===sel)return;sel.dataset.sig=sig;sel.textContent="";
  sel.append(new Option("System default",""));list.forEach(n=>sel.append(new Option(n,n)));if(cur&&!list.includes(cur))sel.append(new Option(cur+" (not plugged in)",cur));sel.value=cur}
 $("micDev").onchange=e=>set("micDev="+encodeURIComponent(e.target.value));$("spkDev").onchange=e=>set("spkDev="+encodeURIComponent(e.target.value));
-$("rb").onclick=()=>set("roger="+(st.roger?0:1));$("hh").onclick=()=>set("handheld="+(st.handheld?0:1));$("pr").onclick=()=>set("parrot="+(st.parrot?0:1));
+$("rb").onclick=()=>set("roger="+(st.roger?0:1));$("hh").onclick=()=>set("handheld="+(st.handheld?0:1));$("pr").onclick=()=>set("parrot="+(st.parrot?0:1));$("gv").onclick=()=>set("gamevoice="+(st.gamevoice?0:1));
 const ptt=$("ptt"),down=e=>{e.preventDefault();ptt.setPointerCapture&&ptt.setPointerCapture(e.pointerId);set("ptt=1")},up=()=>set("ptt=0");
 ptt.addEventListener("pointerdown",down);ptt.addEventListener("pointerup",up);ptt.addEventListener("pointercancel",up);
 $("padd").onclick=()=>{const n=$("pn").value.replace(/[|;]/g,"").trim();if(!n)return $("pn").focus();custom.push([n,$("pc").value,$("pk").value]);$("pn").value="";savePresets()};
