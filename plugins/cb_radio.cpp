@@ -1243,8 +1243,28 @@ static void openBrowser() {
 // put on screen with the mouse; the panel key or Esc takes it off again. [Panel] InGame=0: the outside browser.
 static uintptr_t overlay;      // the widget while it is up (game thread)
 static int overlayIdx = -1;
-static FString16 overlayUrl;   // kept: the engine reads it during LoadURL
 static uintptr_t findFn(const char* name, const char* outer) { return api->find_object("Function", name, outer); }
+static FString16 overlayUrl;   // kept: the engine reads it during LoadURL
+static uintptr_t overlayWeb;   // its web browser
+static DWORD overlayAt;        // when it went up
+// The leaderboard widget loads its own page once its browser is ready -- after our LoadURL (11-21: the panel key showed
+// the leaderboard). So for the first seconds the browser's address is checked and set back to the panel. Game thread.
+static void overlayKeep(void*) {
+    if (!overlay || api->object(overlayIdx) != overlay || !overlayWeb) return;
+    uintptr_t fGet = findFn("GetUrl", "WebBrowser"), fLoad = findFn("LoadURL", "WebBrowser");
+    if (!fGet || !fLoad) return;
+    struct { const wchar_t* d; int n, m; } got{};
+    unsigned char p[32] = {}; int oR = off(fGet, "ReturnValue");
+    if (oR < 0) return;
+    api->process_event(overlayWeb, fGet, p);
+    memcpy(&got, p + oR, sizeof got);
+    bool ours = got.d && got.n > 0 && wcsstr(got.d, L"127.0.0.1");
+    if (!ours) {
+        unsigned char a[32] = {}; memcpy(a, &overlayUrl.s, sizeof overlayUrl.s);
+        api->process_event(overlayWeb, fLoad, a);
+        static int told; if (told++ < 5) MT_LOG("overlay: the browser was on %ls -- set back to the panel", got.d && got.n > 0 ? got.d : L"(nothing)");
+    }
+}
 static void overlayOff(void*) {
     uintptr_t pc = gPC;
     if (overlay && api->object(overlayIdx) == overlay) {
@@ -1314,7 +1334,7 @@ static void overlayUp(void*) {
         api->process_event(lib, f, a);
     }
     if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char a[8] = {1}; api->process_event(pc, f, a); }
-    overlay = w; overlayIdx = -1;
+    overlay = w; overlayIdx = -1; overlayWeb = web; overlayAt = GetTickCount();
     for (int i = 0, n = api->num_objects(); i < n; i++) if (api->object(i) == w) { overlayIdx = i; break; }
     overlayOn = true;
     MT_LOG("overlay: up (browser %s)", web ? "pointed at the panel" : "NOT found");
@@ -1405,6 +1425,7 @@ static DWORD WINAPI run(LPVOID) {
         if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
         if (slow && any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
+        if (overlayOn && GetTickCount() - overlayAt < 6000 && api->game_thread_ready()) api->run_on_game_thread(overlayKeep, nullptr);  // the leaderboard's own load comes late
         if (slow && gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
         Sleep(50);
     }
