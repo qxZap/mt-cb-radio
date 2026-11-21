@@ -1328,7 +1328,16 @@ static void inputMode(bool ui) {
     uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
     if (!pc || !lib) return;
     if (ui) {
-        if (uintptr_t f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary")) {
+        // UI only while it is up, like the game's own menus: the game gets no keys, so Esc closes this window and
+        // does not open the game's menu as well (11-21)
+        uintptr_t f = findFn("SetInputMode_UIOnlyEx", "WidgetBlueprintLibrary");
+        if (f) {
+            unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), fl = off(f, "bFlushInput");
+            if (o >= 0) memcpy(a + o, &pc, 8);
+            if (ow >= 0) memcpy(a + ow, &overlay, 8);
+            if (fl >= 0) a[fl] = 1;
+            api->process_event(lib, f, a);
+        } else if ((f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary"))) {
             unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), hc = off(f, "bHideCursorDuringCapture");
             if (o >= 0) memcpy(a + o, &pc, 8);
             if (ow >= 0) memcpy(a + ow, &overlay, 8);
