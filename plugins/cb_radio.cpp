@@ -1151,6 +1151,10 @@ static DWORD WINAPI run(LPVOID) {
     if (steam.nm) std::thread(netThread).detach();
     DWORD shopAt = 0;
     while (!api->stopping()) {
+        // The game shuts Steam down early on its way out, and Steam's unloaded crash handler stays registered: any
+        // fault after that -- even one our guarded reads would catch -- takes the game down (crashhandler64.dll_unloaded
+        // on every close, 11-21). So once Steam is gone, nothing of ours touches game memory again.
+        if (steam.pipe && (steamGone || !steam.pipe())) { steamGone = true; MT_LOG("Steam is gone: the game is closing, the radio stops"); break; }
         if (world) scanWorld();
         if (!shopAt && gPC) shopAt = GetTickCount() + 20000;
         if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
