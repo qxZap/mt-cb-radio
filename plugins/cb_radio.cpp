@@ -1265,44 +1265,37 @@ static void overlayKeep(void*) {
         static int told; if (told++ < 5) MT_LOG("overlay: the browser was on %ls -- set back to the panel", got.d && got.n > 0 ? got.d : L"(nothing)");
     }
 }
-static void overlayOff(void*) {
-    uintptr_t pc = gPC;
-    if (overlay && api->object(overlayIdx) == overlay) {
-        if (uintptr_t f = findFn("RemoveFromParent", "Widget")) { unsigned char p[8] = {}; api->process_event(overlay, f, p); }
-    }
-    overlay = 0; overlayIdx = -1;
-    if (pc) {
-        uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
-        if (uintptr_t f = findFn("SetInputMode_GameOnly", "WidgetBlueprintLibrary"); f && lib) {
-            unsigned char p[32] = {}; int o = off(f, "PlayerController"), fl = off(f, "bFlushInput");
-            if (o >= 0) memcpy(p + o, &pc, 8);
-            if (fl >= 0) p[fl] = 1;
-            api->process_event(lib, f, p);
-        }
-        if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char p[8] = {0}; api->process_event(pc, f, p); }
-    }
-    overlayOn = false;
-    MT_LOG("overlay: closed");
+// The window is made once per world, hidden, a few seconds after the world is up, and the panel loaded into it then;
+// the panel key only shows and hides it (11-21: making it on the key press waited for the leaderboard site to load
+// first, then for ours). Game thread, all of these.
+static bool visible(uintptr_t w, int vis) {  // ESlateVisibility: 0 Visible, 1 Collapsed
+    uintptr_t f = findFn("SetVisibility", "Widget");
+    if (!w || !f) return false;
+    unsigned char a[8] = {(unsigned char)vis};
+    api->process_event(w, f, a);
+    return true;
 }
-static void overlayUp(void*) {
+static bool overlayAlive() { return overlay && overlayIdx >= 0 && api->object(overlayIdx) == overlay; }
+static void overlayMake(void*) {
     uintptr_t pc = gPC;
-    if (!pc || !panelPort) return;
+    if (overlayAlive() || !pc || !panelPort) return;
     uintptr_t cls = api->find_object("WidgetBlueprintGeneratedClass", "W_Leaderboard_C", "/Game/UI/Leaderboard/W_Leaderboard");
     uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
     uintptr_t fCreate = findFn("Create", "WidgetBlueprintLibrary"), fAdd = findFn("AddToViewport", "UserWidget"),
               fLoad = findFn("LoadURL", "WebBrowser");
     if (!cls || !lib || !fCreate || !fAdd || !fLoad) {
-        MT_LOG("overlay: %s not found -- the outside browser instead", !cls ? "W_Leaderboard (not loaded yet?)" : "a UMG function");
-        openBrowser(); return;
+        static int told; if (told++ < 3) MT_LOG("overlay: %s not found yet", !cls ? "W_Leaderboard" : "a UMG function");
+        return;
     }
     unsigned char p[64] = {};
     int oW = off(fCreate, "WorldContextObject"), oT = off(fCreate, "WidgetType"), oP = off(fCreate, "OwningPlayer"), oR = off(fCreate, "ReturnValue");
-    if (oW < 0 || oT < 0 || oR < 0) { openBrowser(); return; }
+    if (oW < 0 || oT < 0 || oR < 0) return;
     memcpy(p + oW, &pc, 8); memcpy(p + oT, &cls, 8); if (oP >= 0) memcpy(p + oP, &pc, 8);
     api->process_event(lib, fCreate, p);
     uintptr_t w = 0; memcpy(&w, p + oR, 8);
-    if (!w) { MT_LOG("overlay: the widget was not made -- the outside browser instead"); openBrowser(); return; }
+    if (!w) { MT_LOG("overlay: the widget was not made"); return; }
     { unsigned char a[8] = {}; int z = 50; memcpy(a, &z, 4); api->process_event(w, fAdd, a); }  // above the HUD
+    visible(w, 1);  // hidden until the key
     int oWeb = off(cls, "MotorTownWeb"), oBtn = off(cls, "ReloadWebButton");
     uintptr_t web = oWeb >= 0 ? get<uintptr_t>(w + oWeb) : 0, btn = oBtn >= 0 ? get<uintptr_t>(w + oBtn) : 0;
     if (web) {
@@ -1311,7 +1304,7 @@ static void overlayUp(void*) {
         unsigned char a[32] = {}; memcpy(a, &overlayUrl.s, sizeof overlayUrl.s);
         api->process_event(web, fLoad, a);
     }
-    if (btn) if (uintptr_t f = findFn("SetVisibility", "Widget")) { unsigned char a[8] = {1}; api->process_event(btn, f, a); }  // Collapsed: no "reload the leaderboard"
+    if (btn) visible(btn, 1);  // no "reload the leaderboard"
     // a window, not the whole screen (the user, 11-21): the browser's canvas slot anchored to a centred share of the
     // screen ([Panel] Width / Height, percent), so it keeps its proportion on any resolution
     if (web) {
@@ -1319,25 +1312,49 @@ static void overlayUp(void*) {
         if (uintptr_t cW = api->find_object("Class", "Widget", "/Script/UMG")) { int o = off(cW, "Slot"); if (o >= 0) slot = get<uintptr_t>(web + o); }
         uintptr_t fAnch = findFn("SetAnchors", "CanvasPanelSlot"), fOffs = findFn("SetOffsets", "CanvasPanelSlot"), fAlign = findFn("SetAlignment", "CanvasPanelSlot");
         if (slot && fAnch && fOffs) {
-            float wx = (float)(panelW / 100.0), hy = (float)(panelH / 100.0);
+            double wx = panelW / 100.0, hy = panelH / 100.0;
             struct { double minX, minY, maxX, maxY; } an{(1 - wx) / 2, (1 - hy) / 2, (1 + wx) / 2, (1 + hy) / 2};  // FAnchors: two FVector2D (doubles)
             unsigned char a[64] = {}; memcpy(a, &an, sizeof an); api->process_event(slot, fAnch, a);
             unsigned char m[32] = {}; api->process_event(slot, fOffs, m);  // FMargin 0: the anchors are the box
             if (fAlign) { unsigned char z[32] = {}; api->process_event(slot, fAlign, z); }
         } else MT_LOG("overlay: the browser's slot was not found -- it keeps the leaderboard's size");
     }
-    if (uintptr_t f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary")) {
-        unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), hc = off(f, "bHideCursorDuringCapture");
+    overlay = w; overlayWeb = web; overlayAt = GetTickCount(); overlayIdx = -1;
+    for (int i = 0, n = api->num_objects(); i < n; i++) if (api->object(i) == w) { overlayIdx = i; break; }
+    MT_LOG("overlay: made, hidden, the panel loading in it (browser %s)", web ? "found" : "NOT found");
+}
+static void inputMode(bool ui) {
+    uintptr_t pc = gPC;
+    uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
+    if (!pc || !lib) return;
+    if (ui) {
+        if (uintptr_t f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary")) {
+            unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), hc = off(f, "bHideCursorDuringCapture");
+            if (o >= 0) memcpy(a + o, &pc, 8);
+            if (ow >= 0) memcpy(a + ow, &overlay, 8);
+            if (hc >= 0) a[hc] = 0;
+            api->process_event(lib, f, a);
+        }
+    } else if (uintptr_t f = findFn("SetInputMode_GameOnly", "WidgetBlueprintLibrary")) {
+        unsigned char a[32] = {}; int o = off(f, "PlayerController"), fl = off(f, "bFlushInput");
         if (o >= 0) memcpy(a + o, &pc, 8);
-        if (ow >= 0) memcpy(a + ow, &w, 8);
-        if (hc >= 0) a[hc] = 0;
+        if (fl >= 0) a[fl] = 1;
         api->process_event(lib, f, a);
     }
-    if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char a[8] = {1}; api->process_event(pc, f, a); }
-    overlay = w; overlayIdx = -1; overlayWeb = web; overlayAt = GetTickCount();
-    for (int i = 0, n = api->num_objects(); i < n; i++) if (api->object(i) == w) { overlayIdx = i; break; }
+    if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char a[8] = {(unsigned char)(ui ? 1 : 0)}; api->process_event(pc, f, a); }
+}
+static void overlayOff(void*) {
+    if (overlayAlive()) visible(overlay, 1);
+    inputMode(false);
+    overlayOn = false;
+}
+static void overlayUp(void*) {
+    if (!overlayAlive()) overlayMake(nullptr);  // not made yet (the key came before the warm-up): make it now
+    if (!overlayAlive()) { openBrowser(); return; }
+    visible(overlay, 0);
+    inputMode(true);
     overlayOn = true;
-    MT_LOG("overlay: up (browser %s)", web ? "pointed at the panel" : "NOT found");
+    overlayAt = GetTickCount();  // its page checked again while it shows
 }
 static void openPanel() {    // the panel key: the in-game panel on and off, or the outside browser
     if (!inGamePanel) { openBrowser(); return; }
@@ -1425,7 +1442,11 @@ static DWORD WINAPI run(LPVOID) {
         if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
         if (slow && any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
-        if (overlayOn && GetTickCount() - overlayAt < 6000 && api->game_thread_ready()) api->run_on_game_thread(overlayKeep, nullptr);  // the leaderboard's own load comes late
+        static DWORD worldAt;
+        if (!gPC) worldAt = 0; else if (!worldAt) worldAt = GetTickCount();
+        if (inGamePanel && slow && worldAt && GetTickCount() - worldAt > 4000 && !overlay && api->game_thread_ready()) api->run_on_game_thread(overlayMake, nullptr);
+        if (!gPC && overlay) { overlay = 0; overlayIdx = -1; overlayOn = false; }  // the world went, and the widget with it
+        if (overlay && GetTickCount() - overlayAt < 15000 && api->game_thread_ready()) api->run_on_game_thread(overlayKeep, nullptr);  // the leaderboard's own load comes late
         if (slow && gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
         Sleep(50);
     }
