@@ -203,6 +203,13 @@ html{scrollbar-width:thin;scrollbar-color:#46464d transparent;overflow-x:hidden}
 ::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#3d3d43,#2a2a2f);border-radius:6px;border:2px solid #0e0d0b}
 ::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#ff5a3a,#b3261a)}
 ::-webkit-scrollbar-corner{background:transparent}
+/* an app, not a page: nothing selects (the typed frequency and the device lists still take input) */
+*{-webkit-user-select:none;user-select:none;-webkit-user-drag:none}
+input,select{-webkit-user-select:text;user-select:text}
+/* our own hover tip: the browser's own is tiny inside the game */
+#tip{position:fixed;z-index:100;max-width:340px;padding:10px 14px;border-radius:9px;background:#141416f2;border:1px solid #3a3a40;
+ box-shadow:0 10px 30px #000c;color:#ece7da;font:600 16px/1.35 "Barlow Condensed",system-ui,sans-serif;letter-spacing:.03em;pointer-events:none;opacity:0;transition:opacity .12s}
+#tip.on{opacity:1}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -285,6 +292,7 @@ html{scrollbar-width:thin;scrollbar-color:#46464d transparent;overflow-x:hidden}
   <div class="note">System default follows Windows. Pick the same devices your game uses if they differ.</div>
 </div></details>
 </div>
+<div id="tip" role="tooltip"></div>
 <script>
 const CH=[0,26965,26975,26985,27005,27015,27025,27035,27055,27065,27075,27085,27105,27115,27125,27135,27155,27165,27175,27185,27205,27215,27225,27255,27235,27245,27265,27275,27285,27295,27305,27315,27325,27335,27345,27355,27365,27375,27385,27395,27405];
 const NAMES=["","Jeju","Ara","Gangjung","Gapa","Seongsan","Hallim","Gwangjin","Arini","Emergency","Police","Fire","Ambulance","Mountain rescue",
@@ -432,6 +440,15 @@ if(location.search.includes("selftest"))setTimeout(()=>{
  entry="";
  document.body.setAttribute("data-selftest",out.length?"MOVED: "+first+" || "+out.join(" | "):"OK "+first);
 },0);else{setInterval(poll,120);poll()}
+// hover tips: an element's title becomes ours (the native one is removed, so it never shows), shown big near the mouse
+{const tip=document.getElementById("tip");let cur=null;
+ const text=e=>{if(e.hasAttribute("title")){e.dataset.tip=e.getAttribute("title");e.removeAttribute("title")}return e.dataset.tip||""};
+ const place=ev=>{const r=tip.getBoundingClientRect(),z=parseFloat(document.querySelector(".wrap").style.zoom)||1;
+  let x=ev.clientX+16,y=ev.clientY+20;if(x+r.width>innerWidth-8)x=ev.clientX-r.width-12;if(y+r.height>innerHeight-8)y=ev.clientY-r.height-14;tip.style.left=Math.max(6,x)+"px";tip.style.top=Math.max(6,y)+"px"};
+ document.addEventListener("mouseover",ev=>{const e=ev.target.closest("[title],[data-tip]");if(e===cur)return;cur=e;const t=e?text(e):"";tip.textContent=t;tip.classList.toggle("on",!!t);if(t)place(ev)});
+ document.addEventListener("mousemove",ev=>{if(cur){const t=text(cur);if(t!==tip.textContent)tip.textContent=t;place(ev)}});
+ document.addEventListener("mouseleave",()=>{cur=null;tip.classList.remove("on")});
+ document.addEventListener("pointerdown",()=>tip.classList.remove("on"))}
 // one radio at every size (the user, 11-21: down to 400 x 400): the page is laid out for 1080 px and zoomed to fit the
 // window, so the faceplate keeps its proportions instead of reflowing
 function fit(){const W=1080,z=Math.min(1,document.documentElement.clientWidth/W);document.querySelector(".wrap").style.zoom=z}
