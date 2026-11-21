@@ -959,6 +959,10 @@ static void keyThread() {
         }
         if (!key) toldBar = false;
         bool want = key && (txs || parrot);
+        // the game's own voice goes with the key, not with the radio: the people around hear you even when no radio
+        // can send (switched off, a service channel you have no role for, no rig) -- 11-21
+        static bool gvHeld;
+        if (key != gvHeld) { gvHeld = key; speak(key); }
         bool up = f && held(kUp), dn = f && held(kDown), nx = up || dn, pn = f && held(kPanel);
         if (nx && !nextDown) {
             bool down = dn;
@@ -995,7 +999,6 @@ static void keyThread() {
                 std::lock_guard<std::mutex> g(mu); parrotTape.clear();
             } else { wi = nullptr; MT_LOG("no microphone -- cannot talk"); }
             localBeep({2200}, 12);
-            speak(true);
             was = true; sentOn = txs;
         }
         if (was && wi) {
@@ -1054,7 +1057,6 @@ static void keyThread() {
                     if (loopKm >= 0) sendTo(mySid, e, HEAD);
                 }
             }
-            speak(false);
             talking = false; txOn = 0; txLevel = 0; was = false;
             std::lock_guard<std::mutex> g(mu);
             if (parrot && !parrotTape.empty()) {  // radio check: our own over comes back as a station would hear it
