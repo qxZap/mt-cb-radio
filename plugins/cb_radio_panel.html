@@ -194,6 +194,8 @@ button.flash{animation:flash .35s ease-out}
 .chans .townsvc .chb .n{font-size:15px}
 .chb.lockd{opacity:.45;filter:grayscale(1)}.chb.lockd.on{opacity:.7}
 .chb.lockd .d::after{content:" 🔒";font-size:10px;filter:grayscale(1);opacity:.75}
+.ht .htoff{inset:0;border-radius:26px 26px 34px 34px;z-index:6;font-size:17px;line-height:1.4}
+.ht.dimmed .body,.ht.dimmed .ant{filter:grayscale(1) brightness(.45)}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -249,7 +251,7 @@ button.flash{animation:flash .35s ease-out}
   </div>
 </div></div>
 </div>
-<div id="htView" hidden><div class="htwrap"><div class="ht">
+<div id="htView" hidden><div class="htwrap"><div class="ht" id="htBody"><div class="off htoff" id="htOff" hidden>You don't own a ham radio yet.<br>Buy one at the tech store (Ham Radio, 1,500), then take it out once with its hotbar number.</div>
   <span class="ant" aria-hidden="true"></span>
   <div class="body"><span class="ptt" id="htPtt" aria-hidden="true"></span>
     <div class="slide" id="htPower" title="Power: slide up for on" role="switch" tabindex="0" aria-checked="true" aria-label="Handheld power"><span class="track"></span><span class="thumb"></span></div>
@@ -383,6 +385,7 @@ function draw(){if(!st)return;
  $("cbRadio").classList.toggle("locked",view=="cb"&&!here);$("chansCard").classList.toggle("locked",!here);$("htKeys").classList.toggle("locked",view=="ht"&&!here);
  $("cbRadio").classList.toggle("pwroff",view=="cb"&&here&&!pw);$("chansCard").classList.toggle("pwroff",here&&!pw);$("htKeys").classList.toggle("pwroff",view=="ht"&&here&&!pw);
  document.body.classList.toggle("simple",st.mode==1);$("mSimple").setAttribute("aria-pressed",st.mode==1);$("mFull").setAttribute("aria-pressed",st.mode!=1);
+ $("htOff").hidden=!!st.ht.avail;$("htBody").classList.toggle("dimmed",!st.ht.avail);
  if(view=="ht")drawHt(s,Rg);
  if(tuneTo!==null&&(s.khz===tuneTo||Date.now()-tuneAt>2000))tuneTo=null;
  const k=tuneTo!==null?tuneTo:s.khz,c=CH.indexOf(k);
