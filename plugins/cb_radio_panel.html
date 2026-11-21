@@ -196,6 +196,13 @@ button.flash{animation:flash .35s ease-out}
 .chb.lockd .d::after{content:" 🔒";font-size:10px;filter:grayscale(1);opacity:.75}
 .ht .htoff{inset:0;border-radius:26px 26px 34px 34px;z-index:6;font-size:17px;line-height:1.4}
 .ht.dimmed .body,.ht.dimmed .ant{filter:grayscale(1) brightness(.45)}
+/* our own scrollbar, in the radio's colours, instead of the window's default one */
+html{scrollbar-width:thin;scrollbar-color:#46464d transparent;overflow-x:hidden}
+::-webkit-scrollbar{width:9px;height:0}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:linear-gradient(180deg,#3d3d43,#2a2a2f);border-radius:6px;border:2px solid #0e0d0b}
+::-webkit-scrollbar-thumb:hover{background:linear-gradient(180deg,#ff5a3a,#b3261a)}
+::-webkit-scrollbar-corner{background:transparent}
 </style></head><body><div class="wrap">
 
 <div class="bar">
