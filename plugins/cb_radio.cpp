@@ -8,6 +8,16 @@
 // (qxZap_CBRadio_P, sold at the tech store), and it works while it is in your hand (MTCharacter.Net_HoldingItem):
 // the player's own inventory is not readable, the held item is.
 //
+// Two rigs (the user, 2026-11-21): the vehicle's CB and the handheld, each on its own frequency, each switched on or
+// off, both heard at once. The CB stays in its vehicle: out of the cab you hear it from the vehicle, fading out by
+// 40 m. You transmit on the CB, the handheld or both (in the cab); on foot on the handheld. The handheld counts as
+// carried once it has been seen in the hand this session (only the held item is readable, and driving hands are on
+// the wheel).
+//
+// Range goes with the rig (the user, 2026-11-21): the handheld 3 km; a vehicle by its weight, 10 km up to 2 t, 15 to
+// 5 t, 20 to 12 t, 25 above; a boat 20 km, a ship (over 50 t) 60 km so ships talk across the map. A link reaches as far
+// as the smaller of the two rigs: every packet carries its sender's range, so a car never hears past its 10 km.
+//
 // Transport: Steam's ISteamNetworkingMessages, peer to peer by Steam id, on a channel of its own (the game's net driver
 // uses Steam *sockets*, not messages, so nothing of the game's is touched). Every few seconds a hello goes to every
 // player in the session (their Steam id is read off their PlayerState); whoever answers has the plugin. Voice is 8 kHz
@@ -30,6 +40,7 @@
 #include <ws2tcpip.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -43,7 +54,7 @@ using namespace mt;
 
 static const wchar_t* INI = L"cb_radio.ini";
 static const int SR = 8000, FRAME = 160, STEAM_CHANNEL = 27185;  // 27.185 MHz: channel 19
-static const uint32_t MAGIC = 0x31524243;                        // "CBR1"
+static const uint32_t MAGIC = 0x32524243;                        // "CBR2": packets carry the sender's range
 
 // The 40 US/EU CB channels (MHz). 23 sits between 25 and 26: that is the real band plan.
 static const char* FREQ[41] = {"", "26.965", "26.975", "26.985", "27.005", "27.015", "27.025", "27.035", "27.055", "27.065",
@@ -54,12 +65,27 @@ static const char* FREQ[41] = {"", "26.965", "26.975", "26.985", "27.005", "27.0
 // ---- settings ----
 static std::mutex mu;  // everything below that two threads touch
 static const int KHZ_MIN = 25615, KHZ_MAX = 28305;  // export-radio coverage; 5 kHz steps
-static int khz = 27185, volume = 80, squelchPct = 8, micGain = 100, roger = 1, parrot = 0, parrotS = 60;
+static int volume = 80, squelchPct = 8, micGain = 100, roger = 1, parrot = 0, parrotS = 60;
 static bool holding;  // on foot with the CB Handheld in the hand (under mu)
 static int chKhz(int ch) { return ch >= 1 && ch <= 40 ? (int)lround(atof(FREQ[ch]) * 1000) : 0; }
 static int chOf(int k) { for (int c = 1; c <= 40; c++) if (chKhz(c) == k) return c; return 0; }
 static int snapKhz(int k) { k = (k + 2) / 5 * 5; return k < KHZ_MIN ? KHZ_MIN : k > KHZ_MAX ? KHZ_MAX : k; }
-static double rangeKm = 10;
+enum { CB = 0, HT = 1 };
+struct Rig {
+    int khz = 27185; bool on = true, avail = false;
+    double range = 0, x = 0, y = 0;  // km; where its antenna is (cm, map)
+    float hear = 1;                  // how loud its speaker is where we stand: 1 in the cab or in the hand
+};
+static Rig rig[2];        // under mu
+static int txMode = 0;    // in the cab: 0 the CB, 1 the handheld, 2 both. On foot always the handheld
+static bool carried;      // the handheld has been in the hand this session
+static std::atomic<int> myRk{0};
+static std::map<uint64_t, int> peerRk;  // under mu: each plugin player's biggest range, from its hellos
+static std::map<int64_t, float> vehMass;  // under mu: kg by Net_VehicleId, read on the game thread
+static double rangeFor(uintptr_t veh, float kg) {
+    if (isBoatVehicle(veh)) return kg > 50000 ? 60 : 20;
+    return kg <= 0 ? 10 : kg <= 2000 ? 10 : kg <= 5000 ? 15 : kg <= 12000 ? 20 : 25;
+}
 static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME, kVoice = 'G';  // Ctrl+End = channel down, Ctrl+Home = panel
 static std::wstring micDev, spkDev;  // devices by name ("" = the system's default)
 static std::atomic<bool> reopenOut{false};
@@ -113,17 +139,18 @@ static UINT deviceId(bool in, const std::wstring& name) {
 static void saveSettings() {
     auto put = [](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); iniSet(INI, L"Radio", k, b, true); };
     put(L"Frequency", footKhz); put(L"GameVoice", gameVoice); put(L"Volume", volume); put(L"Squelch", squelchPct); put(L"MicGain", micGain);
-    put(L"RogerBeep", roger);
+    put(L"RogerBeep", roger); put(L"Transmit", txMode); put(L"CBOn", rig[CB].on); put(L"HandheldOn", rig[HT].on);
     iniSet(INI, L"Radio", L"MicDevice", micDev.c_str(), true);
     iniSet(INI, L"Radio", L"SpeakerDevice", spkDev.c_str(), true);
 }
 static void loadSettings() {
     int ch = iniInt(INI, L"Radio", L"Channel", 19);  // before frequencies
-    khz = snapKhz(iniInt(INI, L"Radio", L"Frequency", chKhz(ch) ? chKhz(ch) : 27185));
-    footKhz = khz; gameVoice = iniInt(INI, L"Radio", L"GameVoice", 1);
+    footKhz = snapKhz(iniInt(INI, L"Radio", L"Frequency", chKhz(ch) ? chKhz(ch) : 27185));
+    rig[HT].khz = rig[CB].khz = footKhz; gameVoice = iniInt(INI, L"Radio", L"GameVoice", 1);
+    txMode = iniInt(INI, L"Radio", L"Transmit", 0) % 3;
+    rig[CB].on = iniInt(INI, L"Radio", L"CBOn", 1) != 0; rig[HT].on = iniInt(INI, L"Radio", L"HandheldOn", 1) != 0;
     volume = iniInt(INI, L"Radio", L"Volume", 80); squelchPct = iniInt(INI, L"Radio", L"Squelch", 8);
     micGain = iniInt(INI, L"Radio", L"MicGain", 100); roger = iniInt(INI, L"Radio", L"RogerBeep", 1);
-    rangeKm = iniNum(INI, L"Radio", L"RangeKm", 10); if (rangeKm < 0.5) rangeKm = 0.5;
     iniSet(INI, L"Radio", L"MicDevice", L""); iniSet(INI, L"Radio", L"SpeakerDevice", L"");
     micDev = iniGet(INI, L"Radio", L"MicDevice"); spkDev = iniGet(INI, L"Radio", L"SpeakerDevice");
     kTalk = iniInt(INI, L"Keys", L"Talk", VK_HOME); kNext = iniInt(INI, L"Keys", L"Channel", VK_END);
@@ -152,7 +179,6 @@ static void loadDebug() {
     if (!ro.empty()) recOut = _wfopen(ro.c_str(), L"ab");
     if (loopKm >= 0 || !talkFile.empty() || recOut) MT_LOG("debug: loopback %.1f km, talk file %d samples, record %s", loopKm, (int)talkFile.size(), recOut ? "on" : "off");
 }
-static uint32_t myKey() { return (uint32_t)khz; }
 
 // ---- the world: who is here, where we are (read off the game's objects, no game thread needed) ----
 struct Player { uint64_t sid; std::string name; };
@@ -164,9 +190,21 @@ static bool inVehicle;
 static std::atomic<bool> chatOpen{false};  // typing in the game's chat: Home / End are the text cursor's then
 static uintptr_t cChat, gChat, fHasFocus; static int oChatText = -1;
 static uintptr_t cPS, cPC, cVeh, fSpeak;
-static int oVehId = -1, oSeats = -1, oSeatChar = -1, seatStride = 0, oHolding = -1, oHoldKey = -1;
-static uintptr_t cChar;
+static int oVehId = -1, oSeats = -1, oSeatChar = -1, seatStride = 0, oHolding = -1, oHoldKey = -1, oMassRet = -1;
 static int oUid = -1, oName = -1, oPSLoc = -1, oCtrlPS = -1, oPawn = -1, oRoot = -1, oRelLoc = -1;
+static uintptr_t fGetMass, massOf;
+static int64_t massId;
+static void readMass(void*) {  // game thread: the vehicle body's mass (PrimitiveComponent.GetMass on its root)
+    uintptr_t v = massOf, root = v && oRoot >= 0 ? get<uintptr_t>(v + oRoot) : 0;
+    if (!root || !fGetMass || oMassRet < 0) return;
+    unsigned char p[16] = {};
+    api->process_event(root, fGetMass, p);
+    float kg; memcpy(&kg, p + oMassRet, 4);
+    std::lock_guard<std::mutex> g(mu);
+    if (kg > 0 && kg < 1e7f) vehMass[massId] = kg;
+    MT_LOG("vehicle %lld: %.0f kg", (long long)massId, kg);
+}
+static uintptr_t cChar;
 
 static std::string fstr(uintptr_t at) {
     struct { uintptr_t d; int n, m; } s{};
@@ -248,6 +286,9 @@ static bool resolveWorld() {
     cVeh = api->find_object("Class", "MTVehicle", "/Script/MotorTown");
     fSpeak = api->find_object("Function", "ToggleSpeaking", "PlayerController");
     cChar = api->find_object("Class", "MTCharacter", "/Script/MotorTown");
+    fGetMass = api->find_object("Function", "GetMass", "PrimitiveComponent");
+    if (fGetMass) oMassRet = off(fGetMass, "ReturnValue");
+    if (!fGetMass || oMassRet < 0) MT_LOG("GetMass not found: every vehicle gets the car range");
     if (cChar) oHolding = off(cChar, "Net_HoldingItem");
     if (uintptr_t st = api->find_object("ScriptStruct", "MTHoldingItem", "/Script/MotorTown")) oHoldKey = off(st, "ItemKey");
     if (oHolding < 0 || oHoldKey < 0) MT_LOG("held item not found: no handheld on foot");
@@ -331,30 +372,57 @@ static void scanWorld() {
     uint32_t held = 0;
     bool hold = !in && pawn && cbName && oHolding >= 0 && oHoldKey >= 0 && cChar && api->is_a(classOf(pawn), cChar)
                 && rd(pawn + oHolding + oHoldKey, &held, 4) && held == (uint32_t)cbName;
+    // the CB stays with the last vehicle we sat in: where it stands now, if it is still in the world
+    static uintptr_t cbObj;
+    static int64_t cbId;
+    if (in && id) { cbObj = in; cbId = id; }
+    double vp[3] = {0, 0, 0};
+    bool cbThere = false;
+    if (cbObj && std::find(vehicles.begin(), vehicles.end(), cbObj) != vehicles.end()) {
+        int64_t now = 0;
+        uintptr_t vr = get<uintptr_t>(cbObj + oRoot);
+        cbThere = rd(cbObj + oVehId, &now, 8) && now == cbId && vr && rd(vr + oRelLoc, vp, sizeof vp);
+    }
     std::lock_guard<std::mutex> g(mu);
     if (hold != holding) MT_LOG("handheld %s", hold ? "in hand" : "put away");
+    if (hold && !carried) { carried = true; notice(label(rig[HT].khz) + "  (handheld)"); }
     myX = p[0]; myY = p[1]; inVehicle = in != 0; holding = hold;
+    Rig& cb = rig[CB];
+    if (cbId) {
+        auto m = vehMass.find(cbId);
+        if (m == vehMass.end() && in) { vehMass[cbId] = 0; massOf = in; massId = cbId; api->run_on_game_thread(readMass, nullptr); }
+        double r = rangeFor(cbObj, m == vehMass.end() ? 0 : m->second);
+        if (r != cb.range) MT_LOG("CB range %.0f km", r);
+        cb.range = r; cb.avail = true;
+        if (in) { cb.x = myX; cb.y = myY; cb.hear = 1; }
+        else if (cbThere) {  // out of the cab: its speaker, heard from where we stand
+            cb.x = vp[0]; cb.y = vp[1];
+            double m2 = hypot(vp[0] - myX, vp[1] - myY) / 100;
+            cb.hear = m2 >= 40 ? 0 : (float)pow(1 - m2 / 40, 1.5);
+        } else cb.hear = 0;
+    }
+    Rig& ht = rig[HT];
+    ht.avail = carried; ht.range = 3; ht.x = myX; ht.y = myY; ht.hear = 1;
+    myRk = (int)fmax(cb.avail ? cb.range : 0, ht.avail ? ht.range : 0);
     if (id != myVeh && (id || !in)) {  // got in, changed vehicle, or got out
         myVeh = id;
         if (id) {
             auto it = vehRadio.find(id);
-            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {khz, 0}; it = vehRadio.emplace(id, r).first; }
-            khz = it->second.khz;
-            notice(label(khz) + "  (this vehicle's radio)");
+            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {cb.khz, 0}; it = vehRadio.emplace(id, r).first; }
+            cb.khz = it->second.khz;
+            notice(label(cb.khz) + "  (this vehicle's CB)");
             helloNow = true;
-        } else if (khz != footKhz) {
-            khz = footKhz;
-            notice(label(khz) + "  (handheld)");
         }
-        MT_LOG("vehicle %lld: radio on %d kHz", (long long)id, khz);
+        MT_LOG("vehicle %lld: CB on %d kHz", (long long)id, cb.khz);
     }
 }
-// under mu: the channel or code was changed here -- it is the vehicle's while we sit in one, the handheld's on foot
-static void radioChanged() {
-    if (myVeh) { VehRadio& r = vehRadio[myVeh]; r.khz = khz; r.ver++; saveVeh(myVeh, r); helloNow = true; }
-    else footKhz = khz;
+// under mu: a rig was retuned. The CB's frequency is its vehicle's (and the passengers'), the handheld's is ours.
+static void radioChanged(int r) {
+    if (r == CB && myVeh) { VehRadio& v = vehRadio[myVeh]; v.khz = rig[CB].khz; v.ver++; saveVeh(myVeh, v); helloNow = true; }
+    if (r == HT) footKhz = rig[HT].khz;
     saveSettings();
 }
+static int activeRig() { return inVehicle || !carried ? CB : HT; }  // what End and the in-game notices act on
 
 // ---- Steam ----
 struct Steam {
@@ -392,7 +460,8 @@ struct Identity { int type = 16, size = 8; uint64_t sid; char rest[120] = {0}; }
 static_assert(sizeof(Identity) == 136, "SteamNetworkingIdentity is 136 bytes");
 
 #pragma pack(push, 1)
-struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key; float x, y; uint8_t ulaw[FRAME]; };
+struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key; float x, y; uint8_t rk, rsv; uint8_t ulaw[FRAME]; };
+enum { F_REPLY = 1, F_ROGER = 2, F_HT = 4 };  // flags: a hello's answer; an over ended with the roger beep; sent from a handheld
 #pragma pack(pop)
 enum { P_HELLO = 1, P_VOICE = 2, P_END = 3 };
 static const int HEAD = (int)offsetof(Packet, ulaw);
@@ -402,14 +471,15 @@ struct HelloVeh { int64_t veh; uint16_t khz; uint32_t ver; };  // after a hello'
 static_assert(sizeof(HelloVeh) == 14, "hello vehicle block is 14 bytes");
 static const int HELLO = HEAD + (int)sizeof(HelloVeh);              // older plugins read only the head
 static void fillHello(Packet& p) {  // under mu
-    HelloVeh h{myVeh, 0, 0};
+    HelloVeh h{myVeh, 0, 0};  // the vehicle we sit in
     if (myVeh) { const VehRadio& r = vehRadio[myVeh]; h.khz = (uint16_t)r.khz; h.ver = r.ver; }
     memcpy(p.ulaw, &h, sizeof h);
 }
 static void sendTo(uint64_t sid, const Packet& p, int n) {
     if (!steamOk()) return;
     Identity id; id.sid = sid;
-    steam.send(steam.nm, &id, &p, (uint32_t)n, 1 | 32, STEAM_CHANNEL);  // unreliable, no Nagle, restart broken sessions
+    Packet q = p; if (!q.rk) q.rk = (uint8_t)myRk.load();  // the sending rig's range (a hello: the biggest we have)
+    steam.send(steam.nm, &id, &q, (uint32_t)n, 1 | 32, STEAM_CHANNEL);  // unreliable, no Nagle, restart broken sessions
 }
 
 // ---- sound ----
@@ -458,7 +528,7 @@ struct Station {
     enum { IDLE, CHUNK, VOICE, ROGER, TAIL } st = IDLE;
     int n = 0;          // samples left in CHUNK / ROGER / TAIL
     bool ended = false, beep = false;
-    float s = 1, dist = 0, gate = 1, gateT = 1, fade = 0, rate = 1, crack = 0;
+    float s = 1, dist = 0, gate = 1, gateT = 1, fade = 0, rate = 1, crack = 0, gain = 1;  // gain: the rig's speaker where we stand
     int crackN = 0, hop = 0;
     bool off = false;  // tuned 5 kHz away: AM splatter
     float spl = 0;
@@ -471,8 +541,11 @@ static std::vector<float> local;              // our own beeps, mixed in once
 static std::vector<std::array<int16_t, FRAME>> parrotTape;
 static float scope[64], txLevel;
 static std::atomic<bool> talking{false};
+static std::atomic<int> txOn{0};  // the rigs the current over goes out on
 
-static float signalAt(double km) { double v = 1 - km / rangeKm; return v <= 0 ? 0 : (float)pow(v, 0.6); }
+static float signalAt(double km, double range) { double v = range > 0 ? 1 - km / range : 0; return v <= 0 ? 0 : (float)pow(v, 0.6); }
+static double myRange() { double a = rig[CB].avail && rig[CB].on ? rig[CB].range : 0, b = rig[HT].avail && rig[HT].on ? rig[HT].range : 0; return fmax(a, b); }
+static double linkKm(uint64_t sid) { auto r = peerRk.find(sid); int k = r == peerRk.end() || !r->second ? 10 : r->second; return fmin(myRange(), k); }
 static float sample(Station& t, int i, const int16_t* f) {
     float s = t.s, h = t.r.gauss(), out = 0, noise = t.hiss.run(h) * (0.03f + 0.32f * powf(1 - s, 1.6f));
     if (t.st == Station::CHUNK || t.st == Station::TAIL) {
@@ -516,7 +589,7 @@ static void mix(float* out) {
         if (t.st != Station::IDLE) open++;
         for (int i = 0; i < FRAME && t.st != Station::IDLE; i++) {
             float v = sample(t, i, have ? f.data() : nullptr);
-            if (!talking || it->first == 2) out[i] += v;  // half duplex: keying up drowns everything else (not the loopback test)
+            if (!talking || it->first == 4 || it->first == 5) out[i] += v * t.gain;  // half duplex: keying up drowns everything else (not the loopback test)
             if (t.st == Station::CHUNK && --t.n <= 0) t.st = Station::VOICE;
             else if (t.st == Station::ROGER && --t.n <= 0) { t.st = Station::TAIL; t.n = SR * 170 / 1000; }
             else if (t.st == Station::TAIL && --t.n <= 0) { t.st = Station::IDLE; t.ended = false; t.q.clear(); }
@@ -585,12 +658,13 @@ static void received(uint64_t from, const Packet& p, int n) {
     if (from == mySid) {
         static bool said; if (!said) MT_LOG("steam: a message to ourselves came back -- the transport works end to end"); said = true;
         if (loopKm < 0 || p.type == P_HELLO) return;
-        Packet q = p; q.x += (float)(loopKm * 100000); received(2, q, n); return;  // the loopback test, through Steam
+        Packet q = p; q.x += (float)(loopKm * 100000); received(2, q, n); return;  // the loopback test, through Steam (stations 4, 5)
     }
     std::lock_guard<std::mutex> g(mu);
     double km = hypot(p.x - myX, p.y - myY) / 100000.0;
     if (!peers.count(from)) MT_LOG("station on the air: %llx, %.1f km", from, km);
     peers[from] = {GetTickCount(), (float)km};
+    if (from != 2 && p.type == P_HELLO) peerRk[from] = p.rk;
     if (p.type == P_HELLO) {
         if (n >= HELLO) {
             HelloVeh h; memcpy(&h, p.ulaw, sizeof h);
@@ -599,27 +673,37 @@ static void received(uint64_t from, const Packet& p, int n) {
                 VehRadio& r = vehRadio[myVeh];
                 if (h.ver > r.ver || (h.ver == r.ver && h.khz != r.khz && from < mySid)) {
                     r = {h.khz, h.ver}; saveVeh(myVeh, r);
-                    if (khz != h.khz) {
-                        khz = h.khz;
+                    if (rig[CB].khz != h.khz) {
+                        int khz = rig[CB].khz = h.khz;
                         std::string who; for (auto& pl : players) if (pl.sid == from) who = pl.name;
                         notice(label(khz) + "  (set by " + (who.empty() ? "a passenger" : who) + ")");
                     }
                 }
             }
         }
-        if (!(p.flags & 1)) { Packet r = p; r.flags = 1; r.x = (float)myX; r.y = (float)myY; fillHello(r); sendTo(from, r, HELLO); }  // answer once
+        if (!(p.flags & F_REPLY)) { Packet r = p; r.flags = F_REPLY; r.rk = 0; r.x = (float)myX; r.y = (float)myY; fillHello(r); sendTo(from, r, HELLO); }  // answer once
         return;
     }
-    int df = abs((int)p.key - khz);
-    if (df > 5 || (!inVehicle && !holding)) return;  // 5 kHz off still gets through, garbled
-    if (gameVoice && myVeh) { auto pv = peerVeh.find(from); if (pv != peerVeh.end() && pv->second == myVeh) return; }  // in our cab: heard in person
-    float s = signalAt(km) * (df ? 0.45f : 1);
-    auto it = stations.find(from);
+    // which of our rigs hears it: tuned within 5 kHz (off-tune is weak and garbled), in range of the smaller of the two
+    // rigs, and loudest where we stand
+    float s = 0, gain = 0; int df = 0;
+    for (int r = 0; r < 2; r++) {
+        const Rig& g = rig[r];
+        int d = abs((int)p.key - g.khz);
+        if (!g.on || !g.avail || g.hear <= 0 || d > 5) continue;
+        if (r == CB && gameVoice && myVeh && inVehicle) { auto pv = peerVeh.find(from); if (pv != peerVeh.end() && pv->second == myVeh) continue; }  // in our cab: heard in person
+        double link = fmin(g.range, p.rk ? p.rk : 10), km2 = hypot(p.x - g.x, p.y - g.y) / 100000.0;
+        float sr = signalAt(km2, link) * (d ? 0.45f : 1);
+        if (sr * g.hear > s * gain) { s = sr; gain = g.hear; df = d; km = km2; }
+    }
+    uint64_t key = from * 2 + ((p.flags & F_HT) ? 1 : 0);  // a player's CB and handheld are two stations
+    auto it = stations.find(key);
     if (s <= 0 || (it == stations.end() && s * 100 < squelchPct)) return;  // out of range, or under the squelch
-    Station& t = stations[from];
+    Station& t = stations[key];
+    t.gain = gain;
     if (t.name.empty()) { t.r.s ^= (uint32_t)from; t.rate = 0.7f + 1.3f * t.r.uni(); for (auto& pl : players) if (pl.sid == from) t.name = pl.name; if (from == 2) t.name = "Loopback"; }
     t.s = s; t.dist = (float)km; t.last = GetTickCount(); t.off = df != 0;
-    if (p.type == P_END) { t.ended = true; t.beep = (p.flags & 2) != 0; return; }
+    if (p.type == P_END) { t.ended = true; t.beep = (p.flags & F_ROGER) != 0; return; }
     if (n < (int)sizeof(Packet)) return;
     if (t.st == Station::TAIL || t.st == Station::ROGER) { t.st = Station::IDLE; t.q.clear(); }
     t.ended = false;
@@ -645,7 +729,7 @@ static void netThread() {
             if (!lastHello) { Packet me{MAGIC, P_HELLO, 1, 0, 0}; sendTo(mySid, me, HEAD); }  // to ourselves once: logs if Steam loops it back
             lastHello = GetTickCount();
             std::vector<uint64_t> to;
-            Packet h{MAGIC, P_HELLO, 0, seq++, myKey()};
+            Packet h{MAGIC, P_HELLO, 0, seq++, 0};
             { std::lock_guard<std::mutex> g(mu); h.x = (float)myX; h.y = (float)myY; fillHello(h); for (auto& p : players) to.push_back(p.sid);
               for (auto it = peers.begin(); it != peers.end();) it = GetTickCount() - it->second.first > 12000 ? peers.erase(it) : ++it; }
             for (uint64_t sid : to) { if (!steamOk()) break; Identity id; id.sid = sid; steam.accept(steam.nm, &id); sendTo(sid, h, HELLO); }
@@ -684,15 +768,21 @@ static void keyThread() {
     float env = 0.05f;
     uint16_t seq = 0;
     bool was = false, nextDown = false, panelDown = false, keyDown = false;
-    std::vector<uint64_t> to;
+    int sentOn = 0;  // the rigs the current over went out on: its end goes to the same
     while (!api->stopping()) {
         bool f = gameFocused() && !chatOpen, ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool key = f && !ctl && (GetAsyncKeyState(kTalk) & 0x8000);
-        bool want = key && (inVehicle || holding || parrot);
+        int txs;  // the rigs this over goes out on (bit CB, bit HT)
+        { std::lock_guard<std::mutex> g(mu);
+          bool cbOk = inVehicle && rig[CB].avail && rig[CB].on, htOk = carried && rig[HT].on;
+          txs = inVehicle ? ((txMode != 1 && cbOk ? 1 : 0) | (txMode != 0 && htOk ? 2 : 0)) : (htOk ? 2 : 0);
+          if (inVehicle && !txs) txs = cbOk ? 1 : htOk ? 2 : 0; }  // the chosen rig is off: the other one
+        bool want = key && (txs || parrot);
         bool nx = f && (GetAsyncKeyState(kNext) & 0x8000) != 0, pn = f && ctl && (GetAsyncKeyState(kPanel) & 0x8000) != 0;
         if (nx && !nextDown) {
             int c;
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
+              int r = activeRig(), khz = rig[r].khz;
               int best = chOf(khz);
               if (best) best = ctl ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
@@ -702,12 +792,12 @@ static void keyThread() {
                   }
                   if (!best) best = ctl ? 40 : 1;
               }
-              khz = chKhz(best); c = best; radioChanged(); notice(label(khz)); }
+              rig[r].khz = chKhz(best); c = best; radioChanged(r); notice(label(rig[r].khz) + (r == HT ? "  (handheld)" : "")); }
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
         nextDown = nx; panelDown = pn;
-        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice("CB: the rig is in your vehicle. On foot, hold a CB Handheld (tech store)"); }
+        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "CB: your handheld is switched off" : "CB: the rig is in your vehicle. On foot, hold a CB Handheld (tech store)"); }
         keyDown = key;
         if (want && !was) {  // key up
             WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
@@ -722,16 +812,21 @@ static void keyThread() {
             } else { wi = nullptr; MT_LOG("no microphone -- cannot talk"); }
             localBeep({2200}, 12);
             speak(true);
-            was = true;
+            was = true; sentOn = txs;
         }
         if (was && wi) {
-            to.clear();
-            Packet p{MAGIC, P_VOICE, 0, 0, myKey()};
+            sentOn |= txs;
+            Packet out[2]; std::vector<uint64_t> dest[2];  // one packet per rig keyed: its frequency, its range
             {
                 std::lock_guard<std::mutex> g(mu);
-                p.x = (float)myX; p.y = (float)myY;
-                for (auto& e : peers) if (e.second.second <= rangeKm * 1.15) to.push_back(e.first);
+                for (int r = 0; r < 2; r++) {
+                    if (!(txs >> r & 1)) continue;
+                    out[r] = Packet{MAGIC, P_VOICE, (uint8_t)(r == HT ? F_HT : 0), 0, (uint32_t)rig[r].khz};
+                    out[r].x = (float)myX; out[r].y = (float)myY; out[r].rk = (uint8_t)rig[r].range;
+                    for (auto& e : peers) if (e.second.second <= rig[r].range * 1.15) dest[r].push_back(e.first);
+                }
             }
+            Packet& p = out[txs & 1 ? 0 : 1];
             for (int b = 0; b < 8; b++) {
                 if (!(h[b].dwFlags & WHDR_DONE)) continue;
                 float lvl = 0, gain = micGain / 100.f;
@@ -745,10 +840,15 @@ static void keyThread() {
                     fr[i] = (int16_t)(x * 30000);
                     p.ulaw[i] = ulawEnc(fr[i]);
                 }
-                txLevel = lvl;
-                p.seq = seq++;
-                for (uint64_t sid : to) sendTo(sid, p, sizeof p);
-                if (loopKm >= 0) sendTo(mySid, p, sizeof p);
+                txLevel = lvl; txOn = sentOn;
+                uint16_t sq = seq++;
+                for (int r = 0; r < 2; r++) {
+                    if (!(txs >> r & 1)) continue;
+                    if (&out[r] != &p) memcpy(out[r].ulaw, p.ulaw, FRAME);
+                    out[r].seq = sq;
+                    for (uint64_t sid : dest[r]) sendTo(sid, out[r], sizeof(Packet));
+                    if (loopKm >= 0) sendTo(mySid, out[r], sizeof(Packet));
+                }
                 if (parrot) { std::lock_guard<std::mutex> g(mu); if (parrotTape.size() < 50 * 60) parrotTape.push_back(fr); }
                 h[b].dwFlags &= ~WHDR_DONE;
                 waveInAddBuffer(wi, &h[b], sizeof h[b]);
@@ -759,19 +859,23 @@ static void keyThread() {
                 waveInReset(wi);
                 for (int b = 0; b < 8; b++) waveInUnprepareHeader(wi, &h[b], sizeof h[b]);
                 waveInClose(wi); wi = nullptr;
-                Packet e{MAGIC, P_END, (uint8_t)(roger ? 2 : 0), seq++, myKey()};
-                to.clear();
-                { std::lock_guard<std::mutex> g(mu); e.x = (float)myX; e.y = (float)myY;
-                  for (auto& pe : peers) if (pe.second.second <= rangeKm * 1.15) to.push_back(pe.first); }
-                for (uint64_t sid : to) sendTo(sid, e, HEAD);
-                if (loopKm >= 0) sendTo(mySid, e, HEAD);
+                uint16_t sq = seq++;
+                for (int r = 0; r < 2; r++) {
+                    if (!(sentOn >> r & 1)) continue;
+                    Packet e{MAGIC, P_END, (uint8_t)((roger ? F_ROGER : 0) | (r == HT ? F_HT : 0)), sq, 0};
+                    std::vector<uint64_t> to;
+                    { std::lock_guard<std::mutex> g(mu); e.key = (uint32_t)rig[r].khz; e.x = (float)myX; e.y = (float)myY; e.rk = (uint8_t)rig[r].range;
+                      for (auto& pe : peers) if (pe.second.second <= rig[r].range * 1.15) to.push_back(pe.first); }
+                    for (uint64_t sid : to) sendTo(sid, e, HEAD);
+                    if (loopKm >= 0) sendTo(mySid, e, HEAD);
+                }
             }
             speak(false);
-            talking = false; txLevel = 0; was = false;
+            talking = false; txOn = 0; txLevel = 0; was = false;
             std::lock_guard<std::mutex> g(mu);
             if (parrot && !parrotTape.empty()) {  // radio check: our own over comes back as a station would hear it
                 Station& t = stations[1];
-                t.name = "Radio check"; t.s = parrotS / 100.f; t.dist = (float)(rangeKm * (1 - pow(t.s, 1 / 0.6)));
+                t.name = "Radio check"; t.s = parrotS / 100.f; t.dist = (float)(10 * (1 - pow(t.s, 1 / 0.6)));
                 t.st = Station::IDLE; t.q.assign(parrotTape.begin(), parrotTape.end()); t.ended = true; t.beep = roger != 0;
                 t.last = GetTickCount(); t.rate = 1.1f;
                 parrotTape.clear();
@@ -787,11 +891,14 @@ static const unsigned char PANEL[] = {
 };
 static int panelPort;
 // " - Truckers" for the built-in channels and the player's own presets ("Name|ch|code;..."); "" for none.
+// The named channels (the user, 2026-11-21): one per town, then services, water, road and work. No racing; 31-40 and
+// every frequency between the channels are open. Same list as the panel's.
+static const char* CHNAME[41] = {"", "Jeju", "Ara", "Gangjung", "Gapa", "Seongsan", "Hallim", "Gwangjin", "Arini",
+    "Emergency", "Police", "Fire", "Ambulance", "Mountain rescue", "Towing & recovery", "Roadside help", "Marine calling",
+    "Harbours & docks", "Ferries & ships", "Truckers", "Heavy haul & escort", "Taxi & bus", "Delivery & mail",
+    "Garbage & utilities", "Construction", "Farming", "Off-road", "Fishing", "Diving & subs", "Air", "Convoy"};
 static std::string presetName(int ch) {
-    static const struct { int ch; const char* n; } fixed[] = {{9, "Emergency"}, {19, "Truckers"}, {17, "Coast road"}, {14, "Towing"},
-        {21, "Taxi & bus"}, {27, "Delivery"}, {33, "Racing"}, {3, "Marine"}};
-    for (auto& f : fixed) if (f.ch == ch) return std::string("  -  ") + f.n;
-    return "";
+    return ch >= 1 && ch <= 30 ? std::string("  -  ") + CHNAME[ch] : "";
 }
 static std::string jesc(const std::string& s) {
     std::string o;
@@ -804,11 +911,19 @@ static std::string stateJson() {
     std::lock_guard<std::mutex> g(mu);  // also guards the two lists: every request has its own thread
     if (!asked || GetTickCount() - asked > 3000) { asked = GetTickCount(); mics = devices(true); spks = devices(false); }
     char b[640];
-    snprintf(b, sizeof b, "{\"ch\":%d,\"khz\":%d,\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,"
-             "\"parrot\":%d,\"parrotS\":%d,\"range\":%.1f,\"tx\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,\"x\":%.0f,\"y\":%.0f,",
-             chOf(khz), khz, volume, squelchPct, micGain, roger, holding ? 1 : 0, parrot, parrotS, rangeKm, talking ? 1 : 0,
-             txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size(), myX, myY);
+    snprintf(b, sizeof b, "{\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,\"carried\":%d,\"txMode\":%d,"
+             "\"parrot\":%d,\"parrotS\":%d,\"tx\":%d,\"txOn\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,",
+             volume, squelchPct, micGain, roger, holding ? 1 : 0, carried ? 1 : 0, txMode, parrot, parrotS, talking ? 1 : 0, txOn.load(),
+             txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size());
     std::string j = b;
+    for (int r = 0; r < 2; r++) {
+        const Rig& g = rig[r];
+        float rx = 0;
+        for (auto& e : stations) if (e.second.st != Station::IDLE) rx = fmaxf(rx, e.second.s);
+        snprintf(b, sizeof b, "\"%s\":{\"avail\":%d,\"on\":%d,\"khz\":%d,\"ch\":%d,\"range\":%.0f,\"hear\":%.2f},",
+                 r == CB ? "cb" : "ht", g.avail ? 1 : 0, g.on ? 1 : 0, g.khz, chOf(g.khz), g.range, g.hear);
+        j += b;
+    }
     j += "\"micDev\":\"" + jesc(utf8(micDev)) + "\",\"spkDev\":\"" + jesc(utf8(spkDev)) + "\",\"mics\":[";
     for (auto& d : mics) j += "\"" + jesc(utf8(d)) + "\",";
     if (j.back() == ',') j.pop_back();
@@ -823,15 +938,15 @@ static std::string stateJson() {
         snprintf(b, sizeof b, "%s%.2f", first ? "" : ",", e.second.s);
         j += b; first = false;
     }
-    int inRange = 0;
-    for (auto& e : peers) if (e.second.second <= rangeKm && GetTickCount() - e.second.first < 12000) inRange++;
-    snprintf(b, sizeof b, "],\"rigs\":%d,\"scope\":[", inRange);
+    snprintf(b, sizeof b, "],\"range\":%.0f,\"scope\":[", myRange());  // no count of rigs in range: a CB cannot know it
     j += b;
     for (int i = 0; i < 64; i++) { snprintf(b, sizeof b, "%s%.3f", i ? "," : "", scope[i]); j += b; }
     return j + "]}";
 }
 static void apply(const std::string& q) {  // k=v&k=v
     std::lock_guard<std::mutex> g(mu);
+    int r = q.find("rig=ht") != std::string::npos ? HT : CB;  // the rig the panel's controls act on
+    int& khz = rig[r].khz;
     int was = khz;
     size_t at = 0;
     while (at < q.size()) {
@@ -847,13 +962,15 @@ static void apply(const std::string& q) {  // k=v&k=v
         else if (k == "mic") micGain = clamp(n, 10, 300);
         else if (k == "roger") roger = n ? 1 : 0;
         else if (k == "gamevoice") gameVoice = n ? 1 : 0;
+        else if (k == "power") rig[r].on = n != 0;
+        else if (k == "txmode") txMode = clamp(n, 0, 2);
         else if (k == "parrot") parrot = n ? 1 : 0;
         else if (k == "parrotS") parrotS = clamp(n, 1, 100);
         else if (k == "micDev") micDev = fromUrl(v);
         else if (k == "spkDev") { spkDev = fromUrl(v); reopenOut = true; }
         at = amp + 1;
     }
-    if (khz != was) { radioChanged(); notice(label(khz)); }
+    if (khz != was) { radioChanged(r); notice(label(khz) + (r == HT ? "  (handheld)" : "")); }
     saveSettings();
 }
 static void serve(SOCKET c) {
@@ -893,10 +1010,8 @@ static bool selfCheck() {
     for (int v = -32000; v <= 32000; v += 97) { int d = ulawDec(ulawEnc((int16_t)v)) - v; if (abs(d) > 1100 || (abs(v) < 200 && abs(d) > 20)) return false; }
     if (chKhz(19) != 27185 || chKhz(9) != 27065 || chKhz(40) != 27405 || chKhz(23) != 27255 || chOf(27190) || chOf(27185) != 19) return false;
     if (snapKhz(27187) != 27185 || snapKhz(27188) != 27190 || snapKhz(1) != KHZ_MIN || snapKhz(99999) != KHZ_MAX) return false;
-    double r = rangeKm; rangeKm = 10;
-    bool ok = signalAt(0) == 1 && signalAt(10) == 0 && signalAt(5) > 0.5f && signalAt(5) < 0.8f;
-    rangeKm = r;
-    return ok;
+    if (rangeFor(0, 1500) != 10 || rangeFor(0, 2500) != 15 || rangeFor(0, 9000) != 20 || rangeFor(0, 30000) != 25) return false;
+    return signalAt(0, 10) == 1 && signalAt(10, 10) == 0 && signalAt(5, 10) > 0.5f && signalAt(5, 10) < 0.8f && signalAt(1, 0) == 0;
 }
 
 static DWORD WINAPI run(LPVOID) {
@@ -926,7 +1041,7 @@ extern "C" __declspec(dllexport) int PluginInit(const MtApi* a) {
     loadSettings();
     loadDebug();
     if (!selfCheck()) { MT_LOG("self-check FAILED -- not started"); return 0; }
-    MT_LOG("CB radio: %s, range %.1f km", label(khz).c_str(), rangeKm);
+    MT_LOG("CB radio: handheld %s", label(footKhz).c_str());
     CloseHandle(CreateThread(nullptr, 0, run, nullptr, 0, nullptr));
     return 0;
 }
