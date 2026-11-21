@@ -44,7 +44,8 @@
 //   [General] Disabled=1                    the plugin starts nothing
 //   [Keys]    Talk=Home  ChannelUp=End  ChannelDown=Ctrl+End  Panel=Ctrl+Home   a key name, Ctrl+/Shift+/Alt+ in front,
 //             or a Windows key code (36); GameVoice=G, the game's own voice key held while you talk (empty = none)
-//   [Panel]   Port=8095                     the browser panel's port (the next free one if it is taken)
+//   [Panel]   Port=8095                     the panel's port (the next free one if it is taken); InGame=1 shows it
+//             inside the game (the leaderboard's web view), 0 in the outside browser
 //   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=30 Ship=100 (tugs) BigShip=1000 (tankers,
 //             container ships, ferries)   km, how far this rig is heard
 //   [Radio]   Frequency (kHz), Volume, Squelch, MicGain, RogerBeep, GameVoice, Transmit (0 CB, 1 handheld, 2 both),
@@ -114,6 +115,7 @@ static double rangeFor(uintptr_t veh, float kg) {
     }
     return kg <= 0 ? r2t : kg <= 2000 ? r2t : kg <= 5000 ? r5t : kg <= 12000 ? r12t : rHeavy;
 }
+static int inGamePanel = 1;  // [Panel] InGame
 struct Hotkey { int vk = 0; bool ctrl = false, shift = false, alt = false; };
 static std::string keyNames[4];  // as the ini spells them, for the panel
 static Hotkey kTalk, kUp, kDown, kPanel;
@@ -243,6 +245,7 @@ static void loadSettings() {
     iniSet(INI, L"Keys", L"GameVoice", L"G");
     { std::wstring gv = iniGet(INI, L"Keys", L"GameVoice"); kVoice = gv.empty() ? 0 : parseKey(gv).vk; }
     iniInt(INI, L"Panel", L"Port", 8095);  // declared now, so the file shows it from the first launch
+    inGamePanel = iniInt(INI, L"Panel", L"InGame", 1) ? 1 : 0;  // 0: the panel key opens the outside browser
     rHand = iniNum(INI, L"Range", L"Handheld", 3); r2t = iniNum(INI, L"Range", L"UpTo2t", 10); r5t = iniNum(INI, L"Range", L"UpTo5t", 15);
     r12t = iniNum(INI, L"Range", L"UpTo12t", 20); rHeavy = iniNum(INI, L"Range", L"Heavy", 25);
     if (iniGet(INI, L"Range", L"Boat") == L"20") iniSet(INI, L"Range", L"Boat", L"30", true);   // the old defaults move up
@@ -915,6 +918,8 @@ static bool gameFocused() {
     return pid == GetCurrentProcessId();
 }
 static void openPanel();
+static void overlayOff(void*);
+static std::atomic<bool> overlayOn{false};  // the in-game panel is up
 // the game's own push-to-talk, held with ours: the people around (the cab) hear us in person
 static void speakOn(void* on) {
     if (!gPC || !fSpeak) return;
@@ -984,6 +989,10 @@ static void keyThread() {
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
+        static bool escDown;
+        bool esc = f && (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
+        if (esc && !escDown && overlayOn && api->game_thread_ready()) api->run_on_game_thread(overlayOff, nullptr);
+        escDown = esc;
         nextDown = nx; panelDown = pn;
         if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "Ham radio: switched off" : "CB: the rig is in your vehicle. On foot, take out a ham radio (tech store)"); }
         keyDown = key;
@@ -1103,6 +1112,11 @@ static int roleOf(int k) {
 static std::string presetName(int ch) {
     return ch >= 1 && ch <= 30 ? std::string("  -  ") + CHNAME[ch] : "";
 }
+struct FString16 {
+    struct { const wchar_t* d; int n, m; } s{};
+    std::wstring keep;
+    void set(const wchar_t* w) { keep = w; s.d = keep.c_str(); s.n = s.m = (int)keep.size() + 1; }
+};
 static std::string jesc(const std::string& s) {
     std::string o;
     for (char c : s) { if (c == '"' || c == '\\') o += '\\'; if ((unsigned char)c >= 32) o += c; }
@@ -1215,10 +1229,82 @@ static void panelThread() {
     }
     MT_LOG("panel: no free port from %d", first);
 }
-static void openPanel() {
+static void openBrowser() {
     if (!panelPort) return;
     wchar_t url[64]; swprintf(url, 64, L"http://127.0.0.1:%d/", panelPort);
     ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
+}
+// ---- the panel inside the game (the user, 11-21: "like the leaderboard html in game"). The game's leaderboard,
+// W_Leaderboard, is a web browser widget (MotorTownWeb) on a canvas: one of those is made, pointed at our panel,
+// put on screen with the mouse; the panel key or Esc takes it off again. [Panel] InGame=0: the outside browser.
+static uintptr_t overlay;      // the widget while it is up (game thread)
+static int overlayIdx = -1;
+static FString16 overlayUrl;   // kept: the engine reads it during LoadURL
+static uintptr_t findFn(const char* name, const char* outer) { return api->find_object("Function", name, outer); }
+static void overlayOff(void*) {
+    uintptr_t pc = gPC;
+    if (overlay && api->object(overlayIdx) == overlay) {
+        if (uintptr_t f = findFn("RemoveFromParent", "Widget")) { unsigned char p[8] = {}; api->process_event(overlay, f, p); }
+    }
+    overlay = 0; overlayIdx = -1;
+    if (pc) {
+        uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
+        if (uintptr_t f = findFn("SetInputMode_GameOnly", "WidgetBlueprintLibrary"); f && lib) {
+            unsigned char p[32] = {}; int o = off(f, "PlayerController"), fl = off(f, "bFlushInput");
+            if (o >= 0) memcpy(p + o, &pc, 8);
+            if (fl >= 0) p[fl] = 1;
+            api->process_event(lib, f, p);
+        }
+        if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char p[8] = {0}; api->process_event(pc, f, p); }
+    }
+    overlayOn = false;
+    MT_LOG("overlay: closed");
+}
+static void overlayUp(void*) {
+    uintptr_t pc = gPC;
+    if (!pc || !panelPort) return;
+    uintptr_t cls = api->find_object("WidgetBlueprintGeneratedClass", "W_Leaderboard_C", "/Game/UI/Leaderboard/W_Leaderboard");
+    uintptr_t lib = api->find_object("WidgetBlueprintLibrary", "Default__WidgetBlueprintLibrary", "/Script/UMG");
+    uintptr_t fCreate = findFn("Create", "WidgetBlueprintLibrary"), fAdd = findFn("AddToViewport", "UserWidget"),
+              fLoad = findFn("LoadURL", "WebBrowser");
+    if (!cls || !lib || !fCreate || !fAdd || !fLoad) {
+        MT_LOG("overlay: %s not found -- the outside browser instead", !cls ? "W_Leaderboard (not loaded yet?)" : "a UMG function");
+        openBrowser(); return;
+    }
+    unsigned char p[64] = {};
+    int oW = off(fCreate, "WorldContextObject"), oT = off(fCreate, "WidgetType"), oP = off(fCreate, "OwningPlayer"), oR = off(fCreate, "ReturnValue");
+    if (oW < 0 || oT < 0 || oR < 0) { openBrowser(); return; }
+    memcpy(p + oW, &pc, 8); memcpy(p + oT, &cls, 8); if (oP >= 0) memcpy(p + oP, &pc, 8);
+    api->process_event(lib, fCreate, p);
+    uintptr_t w = 0; memcpy(&w, p + oR, 8);
+    if (!w) { MT_LOG("overlay: the widget was not made -- the outside browser instead"); openBrowser(); return; }
+    { unsigned char a[8] = {}; int z = 50; memcpy(a, &z, 4); api->process_event(w, fAdd, a); }  // above the HUD
+    int oWeb = off(cls, "MotorTownWeb"), oBtn = off(cls, "ReloadWebButton");
+    uintptr_t web = oWeb >= 0 ? get<uintptr_t>(w + oWeb) : 0, btn = oBtn >= 0 ? get<uintptr_t>(w + oBtn) : 0;
+    if (web) {
+        wchar_t url[64]; swprintf(url, 64, L"http://127.0.0.1:%d/", panelPort);
+        overlayUrl.set(url);
+        unsigned char a[32] = {}; memcpy(a, &overlayUrl.s, sizeof overlayUrl.s);
+        api->process_event(web, fLoad, a);
+    }
+    if (btn) if (uintptr_t f = findFn("SetVisibility", "Widget")) { unsigned char a[8] = {1}; api->process_event(btn, f, a); }  // Collapsed: no "reload the leaderboard"
+    if (uintptr_t f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary")) {
+        unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), hc = off(f, "bHideCursorDuringCapture");
+        if (o >= 0) memcpy(a + o, &pc, 8);
+        if (ow >= 0) memcpy(a + ow, &w, 8);
+        if (hc >= 0) a[hc] = 0;
+        api->process_event(lib, f, a);
+    }
+    if (uintptr_t f = findFn("SetShowMouseCursor", "PlayerController")) { unsigned char a[8] = {1}; api->process_event(pc, f, a); }
+    overlay = w; overlayIdx = -1;
+    for (int i = 0, n = api->num_objects(); i < n; i++) if (api->object(i) == w) { overlayIdx = i; break; }
+    overlayOn = true;
+    MT_LOG("overlay: up (browser %s)", web ? "pointed at the panel" : "NOT found");
+}
+static void openPanel() {    // the panel key: the in-game panel on and off, or the outside browser
+    if (!inGamePanel) { openBrowser(); return; }
+    if (!api->game_thread_ready()) return;
+    api->run_on_game_thread(overlayOn ? overlayOff : overlayUp, nullptr);
 }
 
 static bool selfCheck() {
