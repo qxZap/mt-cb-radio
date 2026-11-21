@@ -14,6 +14,11 @@
 // carried once it has been seen in the hand this session (only the held item is readable, and driving hands are on
 // the wheel).
 //
+// Service channels (the user, 2026-11-21): police, fire, ambulance, towing and taxi channels -- the common ones and
+// every town's -- are for those services. Anyone may listen (a scanner); talking takes the role: the CB its vehicle's
+// (MTVehicle's Police/FireFighting/Ambulance/Wrecker/Taxi component), the ham radio its wearer's uniform (the
+// character's costume: police, medic, firefighter).
+//
 // Range goes with the rig (the user, 2026-11-21): the handheld 3 km; a vehicle by its weight, 10 km up to 2 t, 15 to
 // 5 t, 20 to 12 t, 25 above; a boat 20 km, a ship (over 50 t) 60 km so ships talk across the map. A link reaches as far
 // as the SENDER's rig: every packet carries its sender's range (a ship's 1000 km over is heard by a car 500 km away;
@@ -81,6 +86,9 @@ static int chKhz(int ch) { return ch >= 1 && ch <= 40 ? (int)lround(atof(FREQ[ch
 static int chOf(int k) { for (int c = 1; c <= 40; c++) if (chKhz(c) == k) return c; return 0; }
 static int snapKhz(int k) { k = (k + 2) / 5 * 5; return k < KHZ_MIN ? KHZ_MIN : k > KHZ_MAX ? KHZ_MAX : k; }
 enum { CB = 0, HT = 1 };
+enum { R_POLICE = 1, R_FIRE = 2, R_AMBULANCE = 4, R_TOW = 8, R_TAXI = 16 };
+static int roles[2];  // under mu: what each rig may talk on -- the CB by its vehicle, the ham radio by the uniform
+static int roleOf(int k);  // the role a frequency needs, 0 for an open one
 struct Rig {
     int khz = 27185; bool on = true, avail = false;
     double range = 0, x = 0, y = 0;  // km; where its antenna is (cm, map)
@@ -280,6 +288,7 @@ static std::atomic<bool> chatOpen{false};  // typing in the game's chat: Home / 
 static uintptr_t cChat, gChat, fHasFocus; static int oChatText = -1;
 static uintptr_t cPS, cPC, cVeh, fSpeak;
 static int oVehId = -1, oSeats = -1, oSeatChar = -1, seatStride = 0, oHolding = -1, oHoldKey = -1, oMassRet = -1;
+static int oVehRole[5] = {-1, -1, -1, -1, -1}, oEquip = -1, oEquipSlots = -1, oEqSlot = -1, oEqKey = -1, eqStride = 0;
 static int oUid = -1, oName = -1, oPSLoc = -1, oCtrlPS = -1, oPawn = -1, oRoot = -1, oRelLoc = -1;
 static uintptr_t fGetMass, massOf;
 static int64_t massId;
@@ -384,6 +393,16 @@ static bool resolveWorld() {
     if (cChar) oHolding = off(cChar, "Net_HoldingItem");
     if (uintptr_t st = api->find_object("ScriptStruct", "MTHoldingItem", "/Script/MotorTown")) oHoldKey = off(st, "ItemKey");
     if (oHolding < 0 || oHoldKey < 0) MT_LOG("held item not found: no handheld on foot");
+    if (cVeh) {
+        const char* comps[5] = {"PoliceComponent", "FireFightingComponent", "AmbulanceComponent", "WreckerComponent", "TaxiComponent"};
+        for (int i = 0; i < 5; i++) oVehRole[i] = off(cVeh, comps[i]);
+    }
+    if (cChar) oEquip = off(cChar, "Net_EquipmentInventory");
+    if (uintptr_t st = api->find_object("ScriptStruct", "MTEquipmentInventory", "/Script/MotorTown")) oEquipSlots = off(st, "EquipmentSlots");
+    if (uintptr_t st = api->find_object("ScriptStruct", "MTEquipmentInventorySlot", "/Script/MotorTown")) {
+        oEqSlot = off(st, "Slot"); oEqKey = off(st, "ItemKey"); if (oEqKey >= 0) eqStride = (oEqKey + 8 + 3) & ~3;
+    }
+    if (oEquip < 0 || oEquipSlots < 0 || oEqSlot < 0 || oEqKey < 0) MT_LOG("costume slot not found: the ham radio has no service roles");
     if (cVeh) { oVehId = off(cVeh, "Net_VehicleId"); oSeats = off(cVeh, "Net_Seats"); }
     if (uintptr_t st = api->find_object("ScriptStruct", "MTNetVehicleSeat", "/Script/MotorTown")) {
         oSeatChar = off(st, "Character"); int t = off(st, "SeatType"); if (t >= 0) seatStride = (t + 1 + 7) & ~7;
@@ -464,10 +483,37 @@ static void scanWorld() {
     uint32_t held = 0;
     bool hold = !in && pawn && cbName && oHolding >= 0 && oHoldKey >= 0 && cChar && api->is_a(classOf(pawn), cChar)
                 && rd(pawn + oHolding + oHoldKey, &held, 4) && held == (uint32_t)cbName;
+    // the uniform: the costume slot of the character on foot (kept while driving: the pawn is the vehicle then)
+    static int costume = -1;
+    if (!in && pawn && cChar && oEquip >= 0 && oEquipSlots >= 0 && eqStride && api->is_a(classOf(pawn), cChar)) {
+        struct { uintptr_t d; int num, max; } a{};
+        int found = 0;
+        if (rd(pawn + oEquip + oEquipSlots, &a, sizeof a) && a.num > 0 && a.num < 16 && a.d)
+            for (int i = 0; i < a.num; i++) {
+                uint8_t slot = 0; uint32_t key = 0;
+                if (rd(a.d + i * eqStride + oEqSlot, &slot, 1) && slot == 4 && rd(a.d + i * eqStride + oEqKey, &key, 4)) found = (int)key;  // EMTEquipmentSlot::Costume
+            }
+        if (found != costume) { costume = found; char b[96] = "none"; if (found) api->name(found, b, sizeof b); MT_LOG("costume: %s", b); }
+    }
+    int htRoles = 0;
+    if (costume > 0) {
+        char b[96] = ""; api->name(costume, b, sizeof b);
+        std::string c = b;
+        if (c.rfind("Costume_Police", 0) == 0) htRoles |= R_POLICE;
+        if (c.rfind("Costume_Medic", 0) == 0) htRoles |= R_AMBULANCE;
+        if (c.rfind("Costume_FireFighter", 0) == 0) htRoles |= R_FIRE;
+    }
     // the CB stays with the last vehicle we sat in: where it stands now, if it is still in the world
     static uintptr_t cbObj;
     static int64_t cbId;
-    if (in && id) { cbObj = in; cbId = id; }
+    static int cbRoles;
+    if (in && id) {
+        int r = 0;
+        for (int i = 0; i < 5; i++) if (oVehRole[i] >= 0 && get<uintptr_t>(in + oVehRole[i])) r |= 1 << i;  // the role components it carries
+        if (cbObj != in || r != cbRoles) MT_LOG("vehicle roles: %s%s%s%s%s", r & R_POLICE ? "police " : "", r & R_FIRE ? "fire " : "",
+                                                r & R_AMBULANCE ? "ambulance " : "", r & R_TOW ? "tow " : "", r & R_TAXI ? "taxi" : "");
+        cbObj = in; cbId = id; cbRoles = r;
+    }
     double vp[3] = {0, 0, 0};
     bool cbThere = false;
     if (cbObj && std::find(vehicles.begin(), vehicles.end(), cbObj) != vehicles.end()) {
@@ -479,6 +525,7 @@ static void scanWorld() {
     if (hold != holding) MT_LOG("handheld %s", hold ? "in hand" : "put away");
     if (hold && !carried) { carried = true; saveSettings(); notice(label(rig[HT].khz) + "  (ham radio)"); }
     myX = p[0]; myY = p[1]; inVehicle = in != 0; holding = hold;
+    roles[CB] = cbRoles; roles[HT] = htRoles;
     Rig& cb = rig[CB];
     if (cbId) {
         auto m = vehMass.find(cbId);
@@ -874,6 +921,17 @@ static void keyThread() {
           bool cbOk = inVehicle && rig[CB].avail && rig[CB].on, htOk = carried && rig[HT].on;
           txs = inVehicle ? ((txMode != 1 && cbOk ? 1 : 0) | (txMode != 0 && htOk ? 2 : 0)) : (htOk ? 2 : 0); }
           // the chosen rig off: nothing goes out and nothing beeps (11-21); Both with one off: that one alone, one beep
+        int barred = 0;
+        { std::lock_guard<std::mutex> g(mu);
+          for (int r = 0; r < 2; r++) { int need = roleOf(rig[r].khz); if ((txs >> r & 1) && need && !(roles[r] & need)) { txs &= ~(1 << r); barred |= need; } } }
+        static bool toldBar;
+        if (key && barred && !txs && !toldBar) {
+            toldBar = true;
+            std::lock_guard<std::mutex> g(mu);
+            notice(std::string("CB: a ") + (barred & R_POLICE ? "police" : barred & R_FIRE ? "fire" : barred & R_AMBULANCE ? "ambulance" : barred & R_TOW ? "towing" : "taxi")
+                   + " channel -- talking needs that service's vehicle (CB) or uniform (ham radio)");
+        }
+        if (!key) toldBar = false;
         bool want = key && (txs || parrot);
         bool up = f && held(kUp), dn = f && held(kDown), nx = up || dn, pn = f && held(kPanel);
         if (nx && !nextDown) {
@@ -1007,6 +1065,13 @@ static std::string townName(int k) {
     int t = d / 90, v = d % 90 / 10;
     return t < 8 && v < 9 ? std::string(TOWNS[t]) + " " + SERVICES[v] : "";
 }
+static int roleOf(int k) {
+    switch (chOf(k)) { case 10: return R_POLICE; case 11: return R_FIRE; case 12: return R_AMBULANCE; case 14: return R_TOW; case 21: return R_TAXI; }
+    int d = k - 27455;
+    if (d < 0 || d % 10 || d / 90 >= 8) return 0;
+    static const int bySvc[9] = {R_POLICE, R_FIRE, R_AMBULANCE, 0, R_TOW, 0, 0, R_TAXI, 0};
+    return bySvc[d % 90 / 10];
+}
 static std::string presetName(int ch) {
     return ch >= 1 && ch <= 30 ? std::string("  -  ") + CHNAME[ch] : "";
 }
@@ -1027,8 +1092,8 @@ static std::string stateJson() {
         const Rig& g = rig[r];
         float rx = 0;
         for (auto& e : stations) if (e.second.st != Station::IDLE) rx = fmaxf(rx, e.second.s);
-        snprintf(b, sizeof b, "\"%s\":{\"avail\":%d,\"on\":%d,\"khz\":%d,\"ch\":%d,\"range\":%.0f,\"hear\":%.2f},",
-                 r == CB ? "cb" : "ht", g.avail ? 1 : 0, g.on ? 1 : 0, g.khz, chOf(g.khz), g.range, g.hear);
+        snprintf(b, sizeof b, "\"%s\":{\"avail\":%d,\"on\":%d,\"khz\":%d,\"ch\":%d,\"range\":%.0f,\"hear\":%.2f,\"roles\":%d},",
+                 r == CB ? "cb" : "ht", g.avail ? 1 : 0, g.on ? 1 : 0, g.khz, chOf(g.khz), g.range, g.hear, roles[r]);
         j += b;
     }
     // what a CB shows: the signal on the meter -- never who is talking or where
@@ -1133,6 +1198,8 @@ static bool selfCheck() {
     if (chKhz(19) != 27185 || chKhz(9) != 27065 || chKhz(40) != 27405 || chKhz(23) != 27255 || chOf(27190) || chOf(27185) != 19) return false;
     if (townName(27455) != "Jeju Police" || townName(27455 + 90 * 3 + 20) != "Gapa Ambulance" || townName(27455 + 90 * 7 + 80) != "Arini Delivery"
         || !townName(27450).empty() || !townName(27455 + 90 * 8).empty() || !townName(27460).empty()) return false;
+    if (roleOf(chKhz(10)) != R_POLICE || roleOf(chKhz(9)) || roleOf(27455 + 90 * 3 + 20) != R_AMBULANCE || roleOf(27455 + 90 * 5 + 30)
+        || roleOf(27455 + 90 * 7 + 70) != R_TAXI || roleOf(chKhz(21)) != R_TAXI) return false;
     if (snapKhz(27187) != 27185 || snapKhz(27188) != 27190 || snapKhz(1) != KHZ_MIN || snapKhz(99999) != KHZ_MAX) return false;
     if (parseKey(L"Ctrl+End").vk != VK_END || !parseKey(L"ctrl + end").ctrl || parseKey(L"Home").vk != VK_HOME || parseKey(L"36").vk != 36
         || parseKey(L"F5").vk != VK_F5 || parseKey(L"g").vk != 'G' || parseKey(L"Numpad3").vk != VK_NUMPAD3 || parseKey(L"nope").vk) return false;

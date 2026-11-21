@@ -192,6 +192,7 @@ button.flash{animation:flash .35s ease-out}
 .chans .towns{grid-column:1/-1;flex-wrap:wrap;justify-self:start}
 .chans .townsvc{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:7px}
 .chans .townsvc .chb .n{font-size:15px}
+.chb.lockd .d::after{content:" 🔒";font-size:10px;filter:grayscale(1);opacity:.75}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -285,6 +286,10 @@ const GROUPS=[["Common",[9,10,11,12,13,14,15,19,20,21,22,23,24,25,26,29,30]],["W
 const TOWNS=["Jeju","Ara","Gangjung","Gapa","Seongsan","Hallim","Gwangjin","Arini"];
 const SERVICES=["Police","Fire","Ambulance","Mountain rescue","Towing","Harbour","Diving & subs","Taxi & bus","Delivery"];
 const townKhz=(t,v)=>27455+90*t+10*v;
+// service channels: anyone listens, talking takes the role (the plugin's roleOf)
+const ROLE={10:1,11:2,12:4,14:8,21:16},SVC_ROLE=[1,2,4,0,8,0,0,16,0],ROLE_NAME={1:"police",2:"fire",4:"ambulance",8:"towing",16:"taxi"};
+const ROLE_HOW={1:"a police vehicle (CB) or a police uniform (ham radio)",2:"a fire engine (CB) or a firefighter uniform (ham radio)",4:"an ambulance (CB) or a medic uniform (ham radio)",8:"a wrecker (CB)",16:"a taxi (CB)"};
+function roleOfK(k){const c=CH.indexOf(k);if(c>0)return ROLE[c]||0;const d=k-27455;if(d<0||d%10||Math.floor(d/90)>=8)return 0;return SVC_ROLE[d%90/10]}
 function nameOf(k){const c=CH.indexOf(k);if(c>0&&c<=30)return NAMES[c];const d=k-27455;if(d<0||d%10)return "";const t=Math.floor(d/90),v=d%90/10;return t<8&&v<9?TOWNS[t]+" "+SERVICES[v]:""}
 const LO=25615,HI=28305;
 let st=null,busy=false,tuneTo=null,tuneAt=0,view="cb",lastLoc=null;
@@ -392,7 +397,8 @@ function draw(){if(!st)return;
  for(const [id,on] of [["tRb",s.roger],["tPr",s.parrot],["tGv",s.gamevoice]])$(id).setAttribute("aria-pressed",on?"true":"false");
  if(tuneTo===null)$("band").value=k;$("ptr").style.left=((k-LO)/(HI-LO)*100)+"%";
  if(document.activeElement!==$("fType"))$("fType").value=mhz(k);
- document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.khz===s.khz));
+ document.querySelectorAll(".chb").forEach(b=>{const k=+b.dataset.khz,need=roleOfK(k),barred=!!(need&&!((Rg.roles||0)&need));b.classList.toggle("on",k===s.khz);
+  if(b.classList.contains("lockd")!==barred||!b.dataset.tip){b.dataset.tip=1;b.classList.toggle("lockd",barred);b.title=(nameOf(k)||"")+" ("+mhz(k)+" MHz)"+(need?" - "+ROLE_NAME[need]+" only: anyone can listen, talking needs "+ROLE_HOW[need]:"")}});
  $("stat").innerHTML=Rg.avail?`range <b>${Rg.range||0} km</b>`:"";
  const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No ham radio yet: buy one at the tech store and take it out once (its hotbar number). It stays with you from then on, in vehicles too.":"";
  $("warn").hidden=!w;$("warn").textContent=w;
