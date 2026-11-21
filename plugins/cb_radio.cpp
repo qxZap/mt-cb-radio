@@ -43,12 +43,43 @@ static std::mutex mu;  // everything below that two threads touch
 static int channel = 19, code = 0, volume = 80, squelchPct = 8, micGain = 100, roger = 1, handheld = 0, parrot = 0, parrotS = 60;
 static double rangeKm = 10;
 static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME;  // Ctrl+End = channel down, Ctrl+Home = panel
-static std::wstring presets;
+static std::wstring presets, micDev, spkDev;  // devices by name ("" = the system's default)
+static std::atomic<bool> reopenOut{false};
+static std::string utf8(const std::wstring& w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string o(n, 0); WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &o[0], n, nullptr, nullptr); return o;
+}
+static std::wstring fromUrl(const std::string& v) {  // %XX / + -> UTF-8 bytes -> wide
+    std::string b;
+    for (size_t i = 0; i < v.size() && b.size() < 2000; i++) {
+        if (v[i] == '%' && i + 2 < v.size()) { b += (char)strtol(v.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
+        else b += v[i] == '+' ? ' ' : v[i];
+    }
+    int n = MultiByteToWideChar(CP_UTF8, 0, b.c_str(), (int)b.size(), nullptr, 0);
+    std::wstring w(n, 0); MultiByteToWideChar(CP_UTF8, 0, b.c_str(), (int)b.size(), &w[0], n); return w;
+}
+// waveIn / waveOut device names (Windows cuts them at 31 characters) and the id of the one picked.
+static std::vector<std::wstring> devices(bool in) {
+    std::vector<std::wstring> o;
+    for (UINT i = 0, n = in ? waveInGetNumDevs() : waveOutGetNumDevs(); i < n; i++) {
+        if (in) { WAVEINCAPSW c; if (waveInGetDevCapsW(i, &c, sizeof c) == MMSYSERR_NOERROR) o.push_back(c.szPname); }
+        else { WAVEOUTCAPSW c; if (waveOutGetDevCapsW(i, &c, sizeof c) == MMSYSERR_NOERROR) o.push_back(c.szPname); }
+    }
+    return o;
+}
+static UINT deviceId(bool in, const std::wstring& name) {
+    if (name.empty()) return WAVE_MAPPER;
+    auto all = devices(in);
+    for (UINT i = 0; i < all.size(); i++) if (all[i] == name) return i;
+    return WAVE_MAPPER;  // unplugged: the default
+}
 static void saveSettings() {
     auto put = [](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); iniSet(INI, L"Radio", k, b, true); };
     put(L"Channel", channel); put(L"Code", code); put(L"Volume", volume); put(L"Squelch", squelchPct); put(L"MicGain", micGain);
     put(L"RogerBeep", roger); put(L"Handheld", handheld);
     iniSet(INI, L"Radio", L"Presets", presets.c_str(), true);
+    iniSet(INI, L"Radio", L"MicDevice", micDev.c_str(), true);
+    iniSet(INI, L"Radio", L"SpeakerDevice", spkDev.c_str(), true);
 }
 static void loadSettings() {
     channel = iniInt(INI, L"Radio", L"Channel", 19); if (channel < 1 || channel > 40) channel = 19;
@@ -59,6 +90,8 @@ static void loadSettings() {
     rangeKm = iniNum(INI, L"Radio", L"RangeKm", 10); if (rangeKm < 0.5) rangeKm = 0.5;
     iniSet(INI, L"Radio", L"Presets", L"");
     presets = iniGet(INI, L"Radio", L"Presets");
+    iniSet(INI, L"Radio", L"MicDevice", L""); iniSet(INI, L"Radio", L"SpeakerDevice", L"");
+    micDev = iniGet(INI, L"Radio", L"MicDevice"); spkDev = iniGet(INI, L"Radio", L"SpeakerDevice");
     kTalk = iniInt(INI, L"Keys", L"Talk", VK_HOME); kNext = iniInt(INI, L"Keys", L"Channel", VK_END);
     kPanel = iniInt(INI, L"Keys", L"Panel", VK_HOME);
 }
@@ -93,6 +126,8 @@ static uint64_t mySid;
 static std::string myName;
 static double myX, myY;
 static bool inVehicle;
+static std::atomic<bool> chatOpen{false};  // typing in the game's chat: Home / End are the text cursor's then
+static uintptr_t cChat, gChat, fHasFocus; static int oChatText = -1;
 static uintptr_t cPS, cPC, cVeh;
 static int oUid = -1, oName = -1, oPSLoc = -1, oCtrlPS = -1, oPawn = -1, oRoot = -1, oRelLoc = -1;
 
@@ -120,6 +155,30 @@ static uintptr_t gPC, fSysMsg, fToText, textCDO;
 static int pSysMsg = -1, pTextIn = -1, pTextRet = -1;
 static std::vector<std::wstring> notices;  // under mu
 static void notice(const std::string& m) { notices.push_back(std::wstring(m.begin(), m.end())); }
+// Is the chat's text box taking the keyboard? (The input row stays visible either way: checked 11-21.) Game thread.
+static void checkChat(void*) {
+    uintptr_t box = gChat && oChatText >= 0 ? get<uintptr_t>(gChat + oChatText) : 0;
+    bool open = false;
+    static uintptr_t cBox = api->find_object("Class", "EditableTextBox", "/Script/UMG");
+    // only a live-looking pair: the chat widget is rescanned every 3 s, and both still carry their classes
+    static uintptr_t fDesc = api->find_object("Function", "HasFocusedDescendants", "Widget"),
+                     fAny = api->find_object("Function", "HasAnyUserFocus", "Widget");
+    static uintptr_t toldChat;
+    if (gChat != toldChat) { toldChat = gChat; MT_LOG("chat widget %p, text box %p (%s)", (void*)gChat, (void*)box, box ? objName(classOf(box)).c_str() : "-"); }
+    if (box && fHasFocus && cBox && api->is_a(classOf(gChat), cChat) && api->is_a(classOf(box), cBox) && !isCDO(box)) {
+        struct { bool ret; } a{}, b{}, c{};
+        api->process_event(box, fHasFocus, &a);
+        if (fDesc) api->process_event(box, fDesc, &b);
+        if (fAny) api->process_event(box, fAny, &c);
+        open = a.ret || b.ret || c.ret;
+        static int was = -1, n;
+        int now = a.ret | b.ret << 1 | c.ret << 2;
+        if (now != was && n++ < 30) { was = now; MT_LOG("chat focus: keyboard %d, descendants %d, any user %d", a.ret, b.ret, c.ret); }
+    }
+    static int told;
+    if (open != chatOpen && told < 20) { told++; MT_LOG("chat %s", open ? "open: CB keys off while typing" : "closed"); }
+    chatOpen = open;
+}
 static void showNotices(void*) {
     std::vector<std::wstring> q;
     { std::lock_guard<std::mutex> g(mu); q.swap(notices); }
@@ -154,23 +213,28 @@ static bool resolveWorld() {
     if (cCtrl) { oCtrlPS = off(cCtrl, "PlayerState"); oPawn = off(cCtrl, "Pawn"); }
     if (cActor) oRoot = off(cActor, "RootComponent");
     if (cScene) oRelLoc = off(cScene, "RelativeLocation");
+    cChat = api->find_object("Class", "ChatWidget", "/Script/MotorTown");
+    if (cChat) oChatText = off(cChat, "ChatTextBox");
+    fHasFocus = api->find_object("Function", "HasKeyboardFocus", "Widget");
+    if (oChatText < 0 || !fHasFocus) MT_LOG("chat box not found: Home / End also act while typing in chat");
     bool ok = cPS && cPC && cVeh && oUid >= 0 && oName >= 0 && oPSLoc >= 0 && oCtrlPS >= 0 && oPawn >= 0 && oRoot >= 0 && oRelLoc >= 0;
     MT_LOG("world fields %s (uid+%x name+%x loc+%x)", ok ? "ok" : "MISSING", oUid, oName, oPSLoc);
     return ok;
 }
 static void scanWorld() {
     static std::vector<uintptr_t> states;
-    static uintptr_t pc;
+    static uintptr_t pc, chat;
     static DWORD lastFull;
     if (GetTickCount() - lastFull > 3000) {  // the full object walk, every 3 s; positions every pass
         lastFull = GetTickCount();
-        states.clear(); pc = 0;
+        states.clear(); pc = 0; chat = 0;
         for (int i = 0, n = api->num_objects(); i < n; i++) {
             uintptr_t o = api->object(i);
             if (!o || isCDO(o)) continue;
             uintptr_t c = classOf(o);
             if (c == cPS || (cPS && api->is_a(c, cPS))) states.push_back(o);
             else if (!pc && (c == cPC || api->is_a(c, cPC))) pc = o;
+            else if (!chat && cChat && api->is_a(c, cChat) && oChatText >= 0 && get<uintptr_t>(o + oChatText)) chat = o;  // the menu's has no text box
         }
         std::vector<Player> found;
         uintptr_t mine = pc ? get<uintptr_t>(pc + oCtrlPS) : 0;
@@ -187,6 +251,7 @@ static void scanWorld() {
         players.swap(found);
     }
     gPC = pc;
+    gChat = chat;
     if (!pc || classOf(pc) == 0) return;
     uintptr_t pawn = get<uintptr_t>(pc + oPawn), root = pawn ? get<uintptr_t>(pawn + oRoot) : 0;
     double p[3] = {0, 0, 0};
@@ -366,13 +431,21 @@ static void localBeep(std::initializer_list<float> freqs, int ms = 45) {
 }
 static void playerThread() {
     WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
-    HWAVEOUT wo;
-    if (waveOutOpen(&wo, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) { MT_LOG("no sound output -- the radio is silent"); return; }
     static int16_t pcm[4][FRAME];
+    float blk[FRAME];
+  for (;;) {  // once per speaker picked
+    reopenOut = false;
+    HWAVEOUT wo;
+    std::wstring dev; { std::lock_guard<std::mutex> g(mu); dev = spkDev; }
+    if (waveOutOpen(&wo, deviceId(false, dev), &wf, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+        MT_LOG("no sound output -- the radio is silent until another speaker is picked");
+        while (!api->stopping() && !reopenOut) Sleep(200);
+        if (api->stopping()) return;
+        continue;
+    }
     WAVEHDR h[4]{};
     for (int b = 0; b < 4; b++) { h[b].lpData = (LPSTR)pcm[b]; h[b].dwBufferLength = sizeof pcm[b]; h[b].dwFlags = WHDR_DONE; }
-    float blk[FRAME];
-    while (!api->stopping()) {
+    while (!api->stopping() && !reopenOut) {
         bool wrote = false;
         for (int b = 0; b < 4; b++) {
             if (!(h[b].dwFlags & WHDR_DONE)) continue;
@@ -387,7 +460,11 @@ static void playerThread() {
         }
         if (!wrote) Sleep(4);
     }
-    waveOutReset(wo); waveOutClose(wo);
+    waveOutReset(wo);
+    for (int b = 0; b < 4; b++) if (h[b].dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(wo, &h[b], sizeof h[b]);
+    waveOutClose(wo);
+    if (api->stopping()) return;
+  }
 }
 
 // ---- receiving ----
@@ -466,7 +543,7 @@ static void keyThread() {
     bool was = false, nextDown = false, panelDown = false, keyDown = false;
     std::vector<uint64_t> to;
     while (!api->stopping()) {
-        bool f = gameFocused(), ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool f = gameFocused() && !chatOpen, ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool key = f && !ctl && (GetAsyncKeyState(kTalk) & 0x8000);
         bool want = (key || pttPanel) && (inVehicle || handheld || parrot);
         bool nx = f && (GetAsyncKeyState(kNext) & 0x8000) != 0, pn = f && ctl && (GetAsyncKeyState(kPanel) & 0x8000) != 0;
@@ -481,7 +558,7 @@ static void keyThread() {
         keyDown = key;
         if (want && !was) {  // key up
             WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
-            if (waveInOpen(&wi, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
+            if (waveInOpen(&wi, [] { std::lock_guard<std::mutex> g(mu); return deviceId(true, micDev); }(), &wf, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
                 for (int b = 0; b < 8; b++) {
                     h[b] = WAVEHDR{}; h[b].lpData = (LPSTR)cap[b]; h[b].dwBufferLength = sizeof cap[b];
                     waveInPrepareHeader(wi, &h[b], sizeof h[b]); waveInAddBuffer(wi, &h[b], sizeof h[b]);
@@ -576,14 +653,23 @@ static std::string jesc(const std::string& s) {
     return o;
 }
 static std::string stateJson() {
-    std::lock_guard<std::mutex> g(mu);
+    static std::vector<std::wstring> mics, spks;  // asked again every few seconds: a headset plugged in mid-game shows up
+    static DWORD asked;
+    std::lock_guard<std::mutex> g(mu);  // also guards the two lists: every request has its own thread
+    if (!asked || GetTickCount() - asked > 3000) { asked = GetTickCount(); mics = devices(true); spks = devices(false); }
     char b[640];
     snprintf(b, sizeof b, "{\"ch\":%d,\"freq\":\"%s\",\"code\":%d,\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"handheld\":%d,"
              "\"parrot\":%d,\"parrotS\":%d,\"range\":%.1f,\"tx\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,\"x\":%.0f,\"y\":%.0f,",
              channel, FREQ[channel], code, volume, squelchPct, micGain, roger, handheld, parrot, parrotS, rangeKm, talking ? 1 : 0,
              txLevel, inVehicle ? 1 : 0, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size(), myX, myY);
     std::string j = b;
-    j += "\"presets\":\""; for (wchar_t c : presets) j += c < 128 && c != '"' && c != '\\' ? (char)c : '?'; j += "\",\"stations\":[";
+    j += "\"presets\":\"" + jesc(utf8(presets)) + "\",\"micDev\":\"" + jesc(utf8(micDev)) + "\",\"spkDev\":\"" + jesc(utf8(spkDev)) + "\",\"mics\":[";
+    for (auto& d : mics) j += "\"" + jesc(utf8(d)) + "\",";
+    if (j.back() == ',') j.pop_back();
+    j += "],\"spks\":[";
+    for (auto& d : spks) j += "\"" + jesc(utf8(d)) + "\",";
+    if (j.back() == ',') j.pop_back();
+    j += "],\"stations\":[";
     bool first = true;
     for (auto& e : stations) {
         if (e.second.st == Station::IDLE) continue;
@@ -620,14 +706,9 @@ static void apply(const std::string& q) {  // k=v&k=v
         else if (k == "parrot") parrot = n ? 1 : 0;
         else if (k == "parrotS") parrotS = clamp(n, 1, 100);
         else if (k == "ptt") pttPanel = n != 0;
-        else if (k == "presets") {  // url-encoded "Name|ch|code;..."
-            std::wstring w;
-            for (size_t i = 0; i < v.size() && w.size() < 900; i++) {
-                if (v[i] == '%' && i + 2 < v.size()) { w += (wchar_t)strtol(v.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
-                else w += v[i] == '+' ? L' ' : (wchar_t)v[i];
-            }
-            presets = w;
-        }
+        else if (k == "presets") presets = fromUrl(v).substr(0, 900);  // "Name|ch|code;..."
+        else if (k == "micDev") micDev = fromUrl(v);
+        else if (k == "spkDev") { spkDev = fromUrl(v); reopenOut = true; }
         at = amp + 1;
     }
     if (channel != wasCh || code != wasCode) notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code));
@@ -688,6 +769,7 @@ static DWORD WINAPI run(LPVOID) {
         if (world) scanWorld();
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
         if (any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
+        if (gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
         Sleep(250);
     }
     return 0;

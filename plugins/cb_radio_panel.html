@@ -35,7 +35,7 @@ body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#2b2822,var(--
 .bars i.on.hot{background:var(--red)}
 canvas{width:100%;height:70px;display:block;margin-top:12px;background:#120c03;border-radius:4px}
 .controls{display:flex;flex-direction:column;gap:12px;min-width:0}
-.knob{display:grid;grid-template-columns:86px 1fr 44px;align-items:center;gap:10px}
+.knob{display:grid;grid-template-columns:86px minmax(0,1fr) 44px;align-items:center;gap:10px}
 .knob label{text-transform:uppercase;letter-spacing:.16em;font-size:12px;color:var(--dim)}
 .knob output{font-family:"Share Tech Mono",monospace;text-align:right;color:var(--ink)}
 input[type=range]{width:100%;accent-color:var(--amber)}
@@ -88,6 +88,8 @@ kbd{font-family:"Share Tech Mono",monospace;background:#2d2a25;border:1px solid 
       <div class="knob"><label for="sq">Squelch</label><input type="range" id="sq" min="0" max="95"><output id="sqO"></output></div>
       <div class="knob"><label for="mic">Mic gain</label><input type="range" id="mic" min="10" max="300"><output id="micO"></output></div>
       <div class="knob"><label for="code2">Privacy</label><select id="code2" aria-label="Privacy code"></select><output></output></div>
+      <div class="knob"><label for="micDev">Mic</label><select id="micDev" aria-label="Microphone"></select><output></output></div>
+      <div class="knob"><label for="spkDev">Speaker</label><select id="spkDev" aria-label="Speaker"></select><output></output></div>
       <div class="btns"><button id="rb">Roger beep</button><button id="hh">Handheld on foot</button><button id="pr">Radio check</button></div>
       <div class="knob" id="prRow"><label for="prS">Check at</label><input type="range" id="prS" min="1" max="100"><output id="prSO"></output></div>
       <button class="ptt" id="ptt">PUSH TO TALK</button>
@@ -149,6 +151,7 @@ function draw(){if(!st)return;const s=st;
  const air=$("air");air.textContent="";s.stations.forEach(x=>air.append(li(x.n,x.km,x.s,1)));if(!s.stations.length)air.innerHTML='<li class="empty">Nobody is talking on this channel.</li>';
  const pe=$("peers");pe.textContent="";s.peers.forEach(x=>pe.append(li(x.n,x.km,x.s,0)));if(!s.peers.length)pe.innerHTML='<li class="empty">No other rig heard yet. Players need the CB Radio plugin too.</li>';
  const sig=JSON.stringify([s.ch,s.code,s.presets]);if(sig!==draw.last){draw.last=sig;presetsFrom(s.presets);drawPresets()}
+ devs("micDev",s.mics||[],s.micDev||"");devs("spkDev",s.spks||[],s.spkDev||"");
  scope(s.scope)}
 const cv=$("scope"),cx=cv.getContext("2d");
 function scope(v){const w=cv.width,h=cv.height;cx.fillStyle="#120c03";cx.fillRect(0,0,w,h);cx.strokeStyle="#3a2808";cx.beginPath();for(let x=0;x<w;x+=40){cx.moveTo(x,0);cx.lineTo(x,h)}cx.stroke();
@@ -160,6 +163,9 @@ $("up").onclick=()=>set("ch="+(st.ch%40+1));$("dn").onclick=()=>set("ch="+((st.c
 $("c9").onclick=()=>set("ch=9&code=0");$("c19").onclick=()=>set("ch=19&code=0");
 for(const k of ["vol","sq","mic","prS"])$(k).onchange=e=>set((k=="prS"?"parrotS":k)+"="+e.target.value);
 $("code2").onchange=e=>set("code="+e.target.value);
+function devs(id,list,cur){const sel=$(id),sig=JSON.stringify([list,cur]);if(sel.dataset.sig===sig||document.activeElement===sel)return;sel.dataset.sig=sig;sel.textContent="";
+ sel.append(new Option("System default",""));list.forEach(n=>sel.append(new Option(n,n)));if(cur&&!list.includes(cur))sel.append(new Option(cur+" (not plugged in)",cur));sel.value=cur}
+$("micDev").onchange=e=>set("micDev="+encodeURIComponent(e.target.value));$("spkDev").onchange=e=>set("spkDev="+encodeURIComponent(e.target.value));
 $("rb").onclick=()=>set("roger="+(st.roger?0:1));$("hh").onclick=()=>set("handheld="+(st.handheld?0:1));$("pr").onclick=()=>set("parrot="+(st.parrot?0:1));
 const ptt=$("ptt"),down=e=>{e.preventDefault();ptt.setPointerCapture&&ptt.setPointerCapture(e.pointerId);set("ptt=1")},up=()=>set("ptt=0");
 ptt.addEventListener("pointerdown",down);ptt.addEventListener("pointerup",up);ptt.addEventListener("pointercancel",up);

@@ -27,6 +27,8 @@ through the radio, with hiss, crackle and fading that grow with distance. A plug
   3 Marine, plus the player's own.
 - **On screen.** Channel changes and the station being heard go through the game's own
   `MotorTownPlayerController.ClientShowSystemMessage`.
+- **Chat.** Home/End do nothing while you type in the game's chat.
+- **Devices.** Microphone and speaker can be picked in the panel (by name; System default otherwise).
 - **Panel.** A localhost page embedded in the dll (`plugins/cb_radio_panel.html` -> `.inc` by `tools/embed_panel.py`).
 
 `tools/cb_radio/preview.py` is the same sound chain in Python, used for sound previews (`python preview.py demo`
@@ -36,7 +38,7 @@ self-checks it).
 
 `MotorTown\Binaries\Win64\plugins\cb_radio.ini`, written by the panel:
 
-- `[Radio]`: `Channel`, `Code`, `Volume`, `Squelch`, `MicGain`, `RogerBeep`, `Handheld` (talk on foot), `RangeKm`,
+- `[Radio]`: `Channel`, `Code`, `Volume`, `Squelch`, `MicGain`, `RogerBeep`, `Handheld` (talk on foot), `RangeKm`, `MicDevice`, `SpeakerDevice`,
   `Presets`.
 - `[Keys]`: virtual-key codes `Talk`, `Channel`, `Panel`.
 - `[Panel] Port`.

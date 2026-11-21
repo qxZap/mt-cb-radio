@@ -14,4 +14,8 @@ Source of truth is `D:\MTLiveMap\mt_loader\plugins\cb_radio.cpp` (+ `cb_radio_pa
   - The own PlayerState id matches Steam's.
   - End/Home and the notices work.
   - A loopback over was recorded and sounds right.
+- Chat: Home/End are ignored while the chat's `ChatTextBox` has keyboard focus (`Widget.HasKeyboardFocus`, game thread,
+  4x a second). Take the chat widget that *has* a text box: the main menu leaves one without. The `ChatInputBox`
+  visibility does not change when chat opens.
+- Devices are picked by waveIn/waveOut name (31 characters max); one unplugged falls back to the default.
 - Untested: two real players.
