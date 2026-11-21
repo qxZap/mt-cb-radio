@@ -271,11 +271,18 @@ struct Steam {
     int (*recv)(void*, int ch, uintptr_t* out, int max) = nullptr;
     bool (*accept)(void*, const void* id) = nullptr;
     void (*release)(uintptr_t) = nullptr;
+    int (*pipe)() = nullptr;
 } steam;
+// The game shuts Steam down on exit long before the loader says stopping (5 s after the world goes); a call after that
+// lands in unloaded Steam code, and the crash handler Steam left behind took the game down on every close (11-21,
+// Windows: crashhandler64.dll_unloaded). Every call asks the pipe first; once it is gone the radio is off for good.
+static volatile bool steamGone = false;
+static bool steamOk() { if (steamGone || api->stopping() || !steam.pipe || !steam.pipe()) { steamGone = true; return false; } return true; }
 static bool steamUp() {
     HMODULE m = GetModuleHandleW(L"steam_api64.dll");
     auto pipe = m ? (int (*)())GetProcAddress(m, "SteamAPI_GetHSteamPipe") : nullptr;
     if (!pipe || !pipe()) return false;  // asked before Steam is up, the accessors hand back nothing for good
+    steam.pipe = pipe;
     auto nmFn = (void* (*)())GetProcAddress(m, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002");
     auto userFn = (void* (*)())GetProcAddress(m, "SteamAPI_SteamUser_v021");
     auto idFn = (uint64_t (*)(void*))GetProcAddress(m, "SteamAPI_ISteamUser_GetSteamID");
@@ -298,6 +305,7 @@ struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key;
 enum { P_HELLO = 1, P_VOICE = 2, P_END = 3 };
 static const int HEAD = (int)offsetof(Packet, ulaw);
 static void sendTo(uint64_t sid, const Packet& p, int n) {
+    if (!steamOk()) return;
     Identity id; id.sid = sid;
     steam.send(steam.nm, &id, &p, (uint32_t)n, 1 | 32, STEAM_CHANNEL);  // unreliable, no Nagle, restart broken sessions
 }
@@ -502,7 +510,7 @@ static void received(uint64_t from, const Packet& p, int n) {
 static void netThread() {
     DWORD lastHello = 0;
     uint16_t seq = 0;
-    while (!api->stopping()) {
+    while (steamOk()) {
         uintptr_t msgs[64];
         int n = steam.recv(steam.nm, STEAM_CHANNEL, msgs, 64);
         for (int i = 0; i < n; i++) {
@@ -520,7 +528,7 @@ static void netThread() {
             Packet h{MAGIC, P_HELLO, 0, seq++, myKey()};
             { std::lock_guard<std::mutex> g(mu); h.x = (float)myX; h.y = (float)myY; for (auto& p : players) to.push_back(p.sid);
               for (auto it = peers.begin(); it != peers.end();) it = GetTickCount() - it->second.first > 12000 ? peers.erase(it) : ++it; }
-            for (uint64_t sid : to) { Identity id; id.sid = sid; steam.accept(steam.nm, &id); sendTo(sid, h, HEAD); }
+            for (uint64_t sid : to) { if (!steamOk()) break; Identity id; id.sid = sid; steam.accept(steam.nm, &id); sendTo(sid, h, HEAD); }
         }
         Sleep(n ? 1 : 5);
     }
