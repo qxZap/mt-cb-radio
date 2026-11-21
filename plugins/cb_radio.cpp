@@ -87,7 +87,8 @@ struct Rig {
 };
 static Rig rig[2];        // under mu
 static int txMode = 0;    // in the cab: 0 the CB, 1 the handheld, 2 both. On foot always the handheld
-static bool carried;      // the handheld has been in the hand this session
+static bool carried;      // the handheld has been in the hand once ([Radio] HaveHandheld keeps it across sessions)
+static int panelMode = 0; // the panel: 0 detailed, 1 simple ([Panel] Mode)
 static std::atomic<int> myRk{0};
 static std::map<uint64_t, int> peerRk;  // under mu: each plugin player's biggest range, from its hellos
 static std::map<int64_t, float> vehMass;  // under mu: kg by Net_VehicleId, read on the game thread
@@ -192,7 +193,8 @@ static UINT deviceId(bool in, const std::wstring& name) {
 static void saveSettings() {
     auto put = [](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); iniSet(INI, L"Radio", k, b, true); };
     put(L"Frequency", footKhz); put(L"GameVoice", gameVoice); put(L"Volume", volume); put(L"Squelch", squelchPct); put(L"MicGain", micGain);
-    put(L"RogerBeep", roger); put(L"Transmit", txMode); put(L"CBOn", rig[CB].on); put(L"HandheldOn", rig[HT].on);
+    put(L"RogerBeep", roger); put(L"HaveHandheld", carried); put(L"Transmit", txMode);
+    { wchar_t b[8]; swprintf(b, 8, L"%d", panelMode); iniSet(INI, L"Panel", L"Mode", b, true); } put(L"CBOn", rig[CB].on); put(L"HandheldOn", rig[HT].on);
     iniSet(INI, L"Radio", L"MicDevice", micDev.c_str(), true);
     iniSet(INI, L"Radio", L"SpeakerDevice", spkDev.c_str(), true);
 }
@@ -201,6 +203,8 @@ static void loadSettings() {
     footKhz = snapKhz(iniInt(INI, L"Radio", L"Frequency", chKhz(ch) ? chKhz(ch) : 27185));
     rig[HT].khz = rig[CB].khz = footKhz; gameVoice = iniInt(INI, L"Radio", L"GameVoice", 1);
     txMode = iniInt(INI, L"Radio", L"Transmit", 0) % 3;
+    carried = iniInt(INI, L"Radio", L"HaveHandheld", 0) != 0;
+    panelMode = iniInt(INI, L"Panel", L"Mode", 0) ? 1 : 0;
     rig[CB].on = iniInt(INI, L"Radio", L"CBOn", 1) != 0; rig[HT].on = iniInt(INI, L"Radio", L"HandheldOn", 1) != 0;
     volume = iniInt(INI, L"Radio", L"Volume", 80); squelchPct = iniInt(INI, L"Radio", L"Squelch", 8);
     micGain = iniInt(INI, L"Radio", L"MicGain", 100); roger = iniInt(INI, L"Radio", L"RogerBeep", 1);
@@ -457,7 +461,7 @@ static void scanWorld() {
     }
     std::lock_guard<std::mutex> g(mu);
     if (hold != holding) MT_LOG("handheld %s", hold ? "in hand" : "put away");
-    if (hold && !carried) { carried = true; notice(label(rig[HT].khz) + "  (handheld)"); }
+    if (hold && !carried) { carried = true; saveSettings(); notice(label(rig[HT].khz) + "  (handheld)"); }
     myX = p[0]; myY = p[1]; inVehicle = in != 0; holding = hold;
     Rig& cb = rig[CB];
     if (cbId) {
@@ -857,6 +861,7 @@ static void keyThread() {
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
               int r = activeRig(), khz = rig[r].khz;
               if (r == CB && !inVehicle) { notice("CB: get in the vehicle to tune its CB"); nextDown = true; continue; }
+              if (!rig[r].on) { notice(r == CB ? "CB: switched off" : "Handheld: switched off"); nextDown = true; continue; }
               int best = chOf(khz);
               if (best) best = down ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
@@ -985,9 +990,9 @@ static std::string stateJson() {
     std::lock_guard<std::mutex> g(mu);  // also guards the two lists: every request has its own thread
     if (!asked || GetTickCount() - asked > 3000) { asked = GetTickCount(); mics = devices(true); spks = devices(false); }
     char b[640];
-    snprintf(b, sizeof b, "{\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,\"carried\":%d,\"txMode\":%d,"
+    snprintf(b, sizeof b, "{\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,\"carried\":%d,\"txMode\":%d,\"mode\":%d,"
              "\"parrot\":%d,\"parrotS\":%d,\"tx\":%d,\"txOn\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,",
-             volume, squelchPct, micGain, roger, holding ? 1 : 0, carried ? 1 : 0, txMode, parrot, parrotS, talking ? 1 : 0, txOn.load(),
+             volume, squelchPct, micGain, roger, holding ? 1 : 0, carried ? 1 : 0, txMode, panelMode, parrot, parrotS, talking ? 1 : 0, txOn.load(),
              txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size());
     std::string j = b;
     for (int r = 0; r < 2; r++) {
@@ -1033,6 +1038,7 @@ static bool apply(const std::string& q) {  // -> the radio was retuned (the clic
         // a radio is only set where it is: the CB from its vehicle's seat, the handheld once it is with you
         bool here = r == CB ? inVehicle : carried;
         if ((k == "ch" || k == "khz" || k == "step" || k == "power") && !here) { at = amp + 1; continue; }
+        if ((k == "ch" || k == "khz" || k == "step") && !rig[r].on) { at = amp + 1; continue; }  // switched off: nothing to tune
         if (k == "ch") { if (chKhz(n)) khz = chKhz(n); }
         else if (k == "khz") khz = snapKhz(n);
         else if (k == "step") khz = snapKhz(khz + 5 * clamp(n, -200, 200));
@@ -1043,6 +1049,7 @@ static bool apply(const std::string& q) {  // -> the radio was retuned (the clic
         else if (k == "gamevoice") gameVoice = n ? 1 : 0;
         else if (k == "power") rig[r].on = n != 0;
         else if (k == "txmode") txMode = clamp(n, 0, 2);
+        else if (k == "mode") panelMode = clamp(n, 0, 1);
         else if (k == "parrot") parrot = n ? 1 : 0;
         else if (k == "parrotS") parrotS = clamp(n, 1, 100);
         else if (k == "micDev") micDev = fromUrl(v);
@@ -1096,6 +1103,43 @@ static bool selfCheck() {
     return signalAt(0, 10) == 1 && signalAt(10, 10) == 0 && signalAt(5, 10) > 0.5f && signalAt(5, 10) < 0.8f && signalAt(1, 0) == 0;
 }
 
+// One look, once a world is up: is the handheld in the game's item list, and what do the shops sell? (11-21: the item
+// did not show at the tech store, twice.) Game thread.
+static void shopCheck(void*) {
+    int key = api->name_index("CB_Handheld");
+    MT_LOG("shop check: name CB_Handheld %s (pool %d)", key ? "known" : "NOT in the name pool", key);
+    uintptr_t own = api->find_object("DataTable", "Items_CBRadio", "/Game/DataAsset/Items/Items_CBRadio");
+    MT_LOG("shop check: table Items_CBRadio %s", own ? "loaded" : "NOT loaded");
+    uintptr_t comp = api->find_object("CompositeDataTable", "Items", "/Game/DataAsset/Items/Items");
+    uintptr_t fRow = api->find_object("Function", "DoesDataTableRowExist", "DataTableFunctionLibrary");
+    uintptr_t lib = api->find_object("DataTableFunctionLibrary", "Default__DataTableFunctionLibrary", "/Script/Engine");
+    for (uintptr_t t : {comp, own}) {
+        if (!t || !fRow || !lib || !key) continue;
+        int oT = off(fRow, "Table"), oR = off(fRow, "RowName"), oRet = off(fRow, "ReturnValue");
+        unsigned char prm[64] = {};
+        if (oT < 0 || oR < 0 || oRet < 0) break;
+        memcpy(prm + oT, &t, 8);
+        uint32_t nm[2] = {(uint32_t)key, 0};
+        memcpy(prm + oR, nm, 8);
+        api->process_event(lib, fRow, prm);
+        MT_LOG("shop check: %s has the row: %s", t == comp ? "Items (composite)" : "Items_CBRadio", prm[oRet] ? "YES" : "no");
+    }
+    if (!comp) MT_LOG("shop check: the Items composite was not found by name");
+    uintptr_t cVend = api->find_object("Class", "MTVendorComponent", "/Script/MotorTown");
+    int oSell = cVend ? off(cVend, "SellItems") : -1, laptop = api->name_index("Furniture_Laptop_01"), told = 0;
+    for (int i = 0, n = api->num_objects(); i < n && cVend && oSell >= 0 && told < 40; i++) {
+        uintptr_t o = api->object(i);
+        if (!o || isCDO(o) || !api->is_a(classOf(o), cVend)) continue;
+        struct { uintptr_t d; int num, max; } a{};
+        if (!rd(o + oSell, &a, sizeof a) || a.num < 0 || a.num > 500) continue;
+        bool hasLaptop = false, hasRadio = false;
+        for (int k = 0; k < a.num; k++) { uint32_t c = 0; rd(a.d + k * 8, &c, 4); hasLaptop |= c == (uint32_t)laptop; hasRadio |= key && c == (uint32_t)key; }
+        uintptr_t outer = outerOf(o);
+        MT_LOG("shop check: vendor %s (%s): %d items%s%s", objName(o).c_str(), outer ? objName(outer).c_str() : "-", a.num,
+               hasLaptop ? ", the tech store list" : "", hasRadio ? ", WITH the handheld" : "");
+        told++;
+    }
+}
 static DWORD WINAPI run(LPVOID) {
     if (!api->wait_engine(INFINITE)) return 0;
     bool world = resolveWorld();
@@ -1105,8 +1149,11 @@ static DWORD WINAPI run(LPVOID) {
     std::thread(keyThread).detach();
     std::thread(panelThread).detach();
     if (steam.nm) std::thread(netThread).detach();
+    DWORD shopAt = 0;
     while (!api->stopping()) {
         if (world) scanWorld();
+        if (!shopAt && gPC) shopAt = GetTickCount() + 20000;
+        if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
         if (any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
         if (gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
