@@ -146,6 +146,8 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 .ht .keys2 button{padding:10px 0;font:600 17px "Barlow Condensed",sans-serif;letter-spacing:.06em;border-radius:10px;background:linear-gradient(180deg,#2e2e32,#18181b)}
 .ht .keys2 .o{color:#ff8a1e}
 .ht .knobs{justify-content:center}
+/* a radio you are not at: heard, not tuned */
+.locked .tune,.locked #kCh,.locked .fin,.locked #tPw,#chansCard.locked .chb,#htKeys.locked{pointer-events:none;opacity:.32;filter:grayscale(1)}
 </style></head><body><div class="wrap">
 
 <div class="bar">
@@ -218,7 +220,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
     <div class="keys2" id="htKeys"></div>
   </div>
 </div></div></div>
-<h2>Channels</h2><div class="card"><div class="chans" id="chans"></div><div class="note">Picks the channel on the radio showing above. Any other frequency is open: tune it, or type it.</div></div>
+<h2>Channels</h2><div class="card" id="chansCard"><div class="chans" id="chans"></div><div class="note">Picks the channel on the radio showing above. Any other frequency is open: tune it, or type it.</div></div>
 <div class="keys" id="keys"></div>
 <div class="warn" id="warn" hidden></div>
 
@@ -306,6 +308,8 @@ function draw(){if(!st)return;
  $("tPw").setAttribute("aria-pressed",st.cb.on?"true":"false");
  const cbMsg=!st.cb.avail?"No vehicle CB yet: get in a vehicle and it is yours.":!st.cb.on?"Switched off. Flip POWER to turn it on.":"";
  $("cbOff").hidden=!(!st.cb.avail);$("cbOff").textContent=cbMsg;$("cbRadio").classList.toggle("dimmed",!st.cb.on||!st.cb.avail);
+ const here=view=="cb"?!!st.inVeh:!!st.carried;  // a radio is only tuned where it is
+ $("cbRadio").classList.toggle("locked",view=="cb"&&!here);$("chansCard").classList.toggle("locked",!here);$("htKeys").classList.toggle("locked",view=="ht"&&!here);
  if(view=="ht")drawHt(s,Rg);
  if(tuneTo!==null&&(s.khz===tuneTo||Date.now()-tuneAt>2000))tuneTo=null;
  const k=tuneTo!==null?tuneTo:s.khz,c=CH.indexOf(k);
@@ -323,7 +327,7 @@ function draw(){if(!st)return;
  if(document.activeElement!==$("fType"))$("fType").value=mhz(k);
  document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.ch===s.ch));
  $("stat").innerHTML=`<b>${esc(s.me||"-")}</b> &middot; ${s.steam?"steam ok":"no steam"} &middot; ${s.inSession} in session &middot; ${s.range} km`;
- const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No handheld yet: buy a CB Handheld Radio at the tech store and take it out once (its hotbar number). It stays with you, in vehicles too.":!s.inVeh&&view=="cb"&&st.cb.avail?(st.cb.hear>0?"Out of the cab: you hear this CB from the vehicle, quieter as you walk away. Talking goes out on the handheld.":"Too far from your vehicle to hear its CB."):"";
+ const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No handheld yet: buy a CB Handheld Radio at the tech store and take it out once (its hotbar number). It stays with you, in vehicles too.":!s.inVeh&&view=="cb"&&st.cb.avail?(st.cb.hear>0?"Out of the cab: you hear this CB from the vehicle, quieter as you walk away. Tune it from the vehicle; talking goes out on the handheld.":"Too far from your vehicle to hear its CB."):"";
  $("warn").hidden=!w;$("warn").textContent=w;
  devs("micDev",s.mics||[],s.micDev||"");devs("spkDev",s.spks||[],s.spkDev||"")}
 function poll(){if(busy)return;busy=true;fetch("/state").then(r=>r.json()).then(s=>{st=s;draw()}).catch(()=>{$("stat").textContent="game not running"}).finally(()=>busy=false)}

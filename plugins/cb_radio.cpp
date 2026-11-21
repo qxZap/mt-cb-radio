@@ -856,6 +856,7 @@ static void keyThread() {
             int c;
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
               int r = activeRig(), khz = rig[r].khz;
+              if (r == CB && !inVehicle) { notice("CB: get in the vehicle to tune its CB"); nextDown = true; continue; }
               int best = chOf(khz);
               if (best) best = down ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
@@ -1029,6 +1030,9 @@ static void apply(const std::string& q) {  // k=v&k=v
         std::string kv = q.substr(at, amp - at), k = kv.substr(0, kv.find('=')), v = kv.find('=') == std::string::npos ? "" : kv.substr(kv.find('=') + 1);
         int n = atoi(v.c_str());
         auto clamp = [](int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; };
+        // a radio is only set where it is: the CB from its vehicle's seat, the handheld once it is with you
+        bool here = r == CB ? inVehicle : carried;
+        if ((k == "ch" || k == "khz" || k == "step" || k == "power") && !here) { at = amp + 1; continue; }
         if (k == "ch") { if (chKhz(n)) khz = chKhz(n); }
         else if (k == "khz") khz = snapKhz(n);
         else if (k == "step") khz = snapKhz(khz + 5 * clamp(n, -200, 200));
