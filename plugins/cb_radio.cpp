@@ -14,8 +14,8 @@
 // The rig belongs to the vehicle (the user, 2026-11-21): in a vehicle, as driver or passenger, the channel and code are
 // that vehicle's (by Net_VehicleId, the same number on every client), kept in [Vehicles] and announced in every hello,
 // so whoever rides along listens to the vehicle's radio and a change from any seat reaches the others. On foot the
-// handheld's own [Radio] Channel/Code come back. Talking also keys the game's own voice chat (PlayerController
-// ToggleSpeaking; [Radio] GameVoice=1), so the people in the cab hear you in person -- and get you only that way: the CB
+// handheld's own [Radio] Channel/Code come back. Talking also holds the game's own voice key (G, its push-to-talk:
+// the green 'transmitting' line and proximity voice; [Keys] GameVoice, [Radio] GameVoice=1), so the people in the cab hear you in person -- and get you only that way: the CB
 // stays quiet for someone in the same vehicle.
 //
 // Settings: plugins\cb_radio.ini ([General] Disabled=1; [Radio] ...; [Keys] virtual-key codes). The panel writes them.
@@ -49,7 +49,7 @@ static const char* FREQ[41] = {"", "26.965", "26.975", "26.985", "27.005", "27.0
 static std::mutex mu;  // everything below that two threads touch
 static int channel = 19, code = 0, volume = 80, squelchPct = 8, micGain = 100, roger = 1, handheld = 0, parrot = 0, parrotS = 60;
 static double rangeKm = 10;
-static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME;  // Ctrl+End = channel down, Ctrl+Home = panel
+static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME, kVoice = 'G';  // Ctrl+End = channel down, Ctrl+Home = panel
 static std::wstring presets, micDev, spkDev;  // devices by name ("" = the system's default)
 static std::atomic<bool> reopenOut{false};
 static int footCh = 19, footCode = 0, gameVoice = 1;  // the handheld's own channel/code; key the game's voice too
@@ -117,6 +117,7 @@ static void loadSettings() {
     micDev = iniGet(INI, L"Radio", L"MicDevice"); spkDev = iniGet(INI, L"Radio", L"SpeakerDevice");
     kTalk = iniInt(INI, L"Keys", L"Talk", VK_HOME); kNext = iniInt(INI, L"Keys", L"Channel", VK_END);
     kPanel = iniInt(INI, L"Keys", L"Panel", VK_HOME);
+    kVoice = iniInt(INI, L"Keys", L"GameVoice", 'G');  // the game's push-to-talk; 0 = ToggleSpeaking instead
 }
 // [Debug]: LoopbackKm (>= 0: everything we send also goes to our own Steam id and comes back as a station that far off), TalkFile (an 8 kHz mono
 // 16-bit wav spoken instead of the mic), RecordOut (the speaker's output appended to a raw s16le 8 kHz file).
@@ -637,7 +638,13 @@ static void speakOn(void* on) {
     api->process_event(gPC, fSpeak, &p);
 }
 static void speak(bool on) {
-    if (gameVoice && fSpeak && api->game_thread_ready() && !api->stopping()) api->run_on_game_thread(speakOn, on ? (void*)1 : nullptr);
+    static bool held;
+    if (!gameVoice && !held) return;
+    if (kVoice) {  // the game's own key, pressed for us: exactly what G does, its green line included
+        if (on == held) return;
+        held = on;
+        keybd_event((BYTE)kVoice, (BYTE)MapVirtualKeyW(kVoice, MAPVK_VK_TO_VSC), on ? 0 : KEYEVENTF_KEYUP, 0);
+    } else if (fSpeak && api->game_thread_ready() && !api->stopping()) api->run_on_game_thread(speakOn, on ? (void*)1 : nullptr);
 }
 static void keyThread() {
     HWAVEIN wi = nullptr;
