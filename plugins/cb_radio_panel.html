@@ -23,7 +23,7 @@ body{margin:0;background:radial-gradient(1100px 600px at 50% -15%,#26231e,var(--
 .status{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
 .status b{color:var(--ink);font-weight:600}
 .main{display:grid;grid-template-columns:minmax(0,250px) minmax(0,1fr) minmax(0,200px);gap:18px;align-items:center}
-@media (max-width:860px){.main{grid-template-columns:1fr}.lcd{height:auto}}
+
 /* meter */
 .meter{background:linear-gradient(180deg,#f6e7b8,#e9d391);border-radius:8px;border:3px solid #050505;box-shadow:inset 0 0 18px #c89a3a,0 0 22px #ffcf6a33;aspect-ratio:1.55;max-width:100%}
 .meter svg{display:block;width:100%;height:100%}
@@ -49,7 +49,7 @@ body{margin:0;background:radial-gradient(1100px 600px at 50% -15%,#26231e,var(--
 .big .k{font-size:13px}
 /* tuning strip */
 .tune{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;margin-top:18px}
-@media (max-width:620px){.tune{grid-template-columns:1fr 1fr}.tune .dial{grid-column:1/-1;order:-1}}
+
 .pair{display:flex;flex-direction:column;gap:6px}.pair button{padding:5px 12px;min-width:84px}
 body.simple .tune{grid-template-columns:minmax(0,1fr) auto}body.simple .tune::before{content:""}
 body.simple .adv{display:none!important}
@@ -86,7 +86,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 .chb .d{font-size:12px;color:#c9cacf;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chb.on{border-color:var(--seg);box-shadow:0 3px 0 #000,0 0 10px #ff3b2655,inset 0 1px 0 #ffffff22}
 .mic{position:absolute;right:-6px;top:56%;width:22px;height:44px;border-radius:5px;background:linear-gradient(90deg,#2a2a2e,#4a4a50,#202024);box-shadow:0 2px 4px #000}
-@media (max-width:860px){.mic{display:none}}
+
 .keys{display:flex;gap:14px;flex-wrap:wrap;color:var(--dim);font-size:13px;margin:14px 6px 0}
 kbd{font-family:"Share Tech Mono",monospace;background:#26262a;border:1px solid #444;border-bottom-width:2px;border-radius:4px;padding:1px 6px;color:var(--ink)}
 .warn{color:#ffcf7a;font-size:15px;margin:10px 6px 0}
@@ -425,6 +425,10 @@ if(location.search.includes("selftest"))setTimeout(()=>{
  entry="";
  document.body.setAttribute("data-selftest",out.length?"MOVED: "+first+" || "+out.join(" | "):"OK "+first);
 },0);else{setInterval(poll,120);poll()}
+// one radio at every size (the user, 11-21: down to 400 x 400): the page is laid out for 1080 px and zoomed to fit the
+// window, so the faceplate keeps its proportions instead of reflowing
+function fit(){const W=1080,z=Math.min(1,document.documentElement.clientWidth/W);document.querySelector(".wrap").style.zoom=z}
+addEventListener("resize",fit);fit();
 
 const stepCh=d=>{const k=st[view].khz,cur=CH.indexOf(k);let best=0;
  if(cur>0)best=(cur-1+d+40)%40+1;  // by number: 23 sits out of order on the band

@@ -45,7 +45,8 @@
 //   [Keys]    Talk=Home  ChannelUp=End  ChannelDown=Ctrl+End  Panel=Ctrl+Home   a key name, Ctrl+/Shift+/Alt+ in front,
 //             or a Windows key code (36); GameVoice=G, the game's own voice key held while you talk (empty = none)
 //   [Panel]   Port=8095                     the panel's port (the next free one if it is taken); InGame=1 shows it
-//             inside the game (the leaderboard's web view), 0 in the outside browser
+//             inside the game (the leaderboard's web view), 0 in the outside browser;
+//             Width=72 Height=88: the in-game window, percent of the screen
 //   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=30 Ship=100 (tugs) BigShip=1000 (tankers,
 //             container ships, ferries)   km, how far this rig is heard
 //   [Radio]   Frequency (kHz), Volume, Squelch, MicGain, RogerBeep, GameVoice, Transmit (0 CB, 1 handheld, 2 both),
@@ -116,6 +117,7 @@ static double rangeFor(uintptr_t veh, float kg) {
     return kg <= 0 ? r2t : kg <= 2000 ? r2t : kg <= 5000 ? r5t : kg <= 12000 ? r12t : rHeavy;
 }
 static int inGamePanel = 1;  // [Panel] InGame
+static double panelW = 72, panelH = 88;  // [Panel] Width / Height: the in-game window, percent of the screen
 struct Hotkey { int vk = 0; bool ctrl = false, shift = false, alt = false; };
 static std::string keyNames[4];  // as the ini spells them, for the panel
 static Hotkey kTalk, kUp, kDown, kPanel;
@@ -246,6 +248,8 @@ static void loadSettings() {
     { std::wstring gv = iniGet(INI, L"Keys", L"GameVoice"); kVoice = gv.empty() ? 0 : parseKey(gv).vk; }
     iniInt(INI, L"Panel", L"Port", 8095);  // declared now, so the file shows it from the first launch
     inGamePanel = iniInt(INI, L"Panel", L"InGame", 1) ? 1 : 0;  // 0: the panel key opens the outside browser
+    panelW = iniNum(INI, L"Panel", L"Width", 72); panelH = iniNum(INI, L"Panel", L"Height", 88);
+    panelW = panelW < 30 ? 30 : panelW > 100 ? 100 : panelW; panelH = panelH < 30 ? 30 : panelH > 100 ? 100 : panelH;
     rHand = iniNum(INI, L"Range", L"Handheld", 3); r2t = iniNum(INI, L"Range", L"UpTo2t", 10); r5t = iniNum(INI, L"Range", L"UpTo5t", 15);
     r12t = iniNum(INI, L"Range", L"UpTo12t", 20); rHeavy = iniNum(INI, L"Range", L"Heavy", 25);
     if (iniGet(INI, L"Range", L"Boat") == L"20") iniSet(INI, L"Range", L"Boat", L"30", true);   // the old defaults move up
@@ -1288,6 +1292,20 @@ static void overlayUp(void*) {
         api->process_event(web, fLoad, a);
     }
     if (btn) if (uintptr_t f = findFn("SetVisibility", "Widget")) { unsigned char a[8] = {1}; api->process_event(btn, f, a); }  // Collapsed: no "reload the leaderboard"
+    // a window, not the whole screen (the user, 11-21): the browser's canvas slot anchored to a centred share of the
+    // screen ([Panel] Width / Height, percent), so it keeps its proportion on any resolution
+    if (web) {
+        uintptr_t slot = 0;
+        if (uintptr_t cW = api->find_object("Class", "Widget", "/Script/UMG")) { int o = off(cW, "Slot"); if (o >= 0) slot = get<uintptr_t>(web + o); }
+        uintptr_t fAnch = findFn("SetAnchors", "CanvasPanelSlot"), fOffs = findFn("SetOffsets", "CanvasPanelSlot"), fAlign = findFn("SetAlignment", "CanvasPanelSlot");
+        if (slot && fAnch && fOffs) {
+            float wx = (float)(panelW / 100.0), hy = (float)(panelH / 100.0);
+            struct { double minX, minY, maxX, maxY; } an{(1 - wx) / 2, (1 - hy) / 2, (1 + wx) / 2, (1 + hy) / 2};  // FAnchors: two FVector2D (doubles)
+            unsigned char a[64] = {}; memcpy(a, &an, sizeof an); api->process_event(slot, fAnch, a);
+            unsigned char m[32] = {}; api->process_event(slot, fOffs, m);  // FMargin 0: the anchors are the box
+            if (fAlign) { unsigned char z[32] = {}; api->process_event(slot, fAlign, z); }
+        } else MT_LOG("overlay: the browser's slot was not found -- it keeps the leaderboard's size");
+    }
     if (uintptr_t f = findFn("SetInputMode_GameAndUIEx", "WidgetBlueprintLibrary")) {
         unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), hc = off(f, "bHideCursorDuringCapture");
         if (o >= 0) memcpy(a + o, &pc, 8);
