@@ -219,7 +219,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
   </div>
 </div></div></div>
 <h2>Channels</h2><div class="card"><div class="chans" id="chans"></div><div class="note">Picks the channel on the radio showing above. Any other frequency is open: tune it, or type it.</div></div>
-<div class="keys"><span><kbd>Home</kbd> hold to talk (also keys game voice)</span><span><kbd>End</kbd> next channel</span><span><kbd>Ctrl</kbd>+<kbd>End</kbd> previous</span><span><kbd>Ctrl</kbd>+<kbd>Home</kbd> this panel</span></div>
+<div class="keys" id="keys"></div>
 <div class="warn" id="warn" hidden></div>
 
 
@@ -298,6 +298,8 @@ const chName=c=>NAMES[c]||"";
 function draw(){if(!st)return;
  const loc=st.inVeh?"veh":"foot";if(loc!==lastLoc){lastLoc=loc;view=st.inVeh||!st.carried?"cb":"ht"}  // follows you in and out; a click overrides
  const Rg=st[view]||{},s=Object.assign({},st,{khz:Rg.khz,ch:Rg.ch});
+ if(st.keys){const kb=k=>esc(k).split("+").map(x=>`<kbd>${x}</kbd>`).join("+"),t=[["hold to talk (also keys game voice)"],["next channel"],["previous channel"],["this panel"]];
+  const h=st.keys.map((k,i)=>`<span>${kb(k)} ${t[i]}</span>`).join("")+'<span>change them in plugins\cb_radio.ini [Keys]</span>';if($("keys").dataset.h!==h){$("keys").dataset.h=h;$("keys").innerHTML=h}}
  $("vCb").setAttribute("aria-pressed",view=="cb");$("vHt").setAttribute("aria-pressed",view=="ht");
  $("cbView").hidden=view!="cb";$("htView").hidden=view!="ht";
  $("txBox").hidden=!(st.inVeh&&st.carried);for(const i of [0,1,2])$("tx"+i).setAttribute("aria-pressed",st.txMode==i);

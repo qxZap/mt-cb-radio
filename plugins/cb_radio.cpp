@@ -34,7 +34,16 @@
 // the green 'transmitting' line and proximity voice; [Keys] GameVoice, [Radio] GameVoice=1), so the people in the cab hear you in person -- and get you only that way: the CB
 // stays quiet for someone in the same vehicle.
 //
-// Settings: plugins\cb_radio.ini ([General] Disabled=1; [Radio] ...; [Keys] virtual-key codes). The panel writes them.
+// Settings: plugins\cb_radio.ini, written with its defaults on first launch (the panel keeps [Radio] up to date):
+//   [General] Disabled=1                    the plugin starts nothing
+//   [Keys]    Talk=Home  ChannelUp=End  ChannelDown=Ctrl+End  Panel=Ctrl+Home   a key name, Ctrl+/Shift+/Alt+ in front,
+//             or a Windows key code (36); GameVoice=G, the game's own voice key held while you talk (empty = none)
+//   [Panel]   Port=8095                     the browser panel's port (the next free one if it is taken)
+//   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=20 Ship=60   km, this rig's own (a link uses
+//             the smaller of the two rigs)
+//   [Radio]   Frequency (kHz), Volume, Squelch, MicGain, RogerBeep, GameVoice, Transmit (0 CB, 1 handheld, 2 both),
+//             CBOn, HandheldOn, MicDevice, SpeakerDevice
+//   [Vehicles] each vehicle's CB frequency, by vehicle id
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -82,11 +91,55 @@ static bool carried;      // the handheld has been in the hand this session
 static std::atomic<int> myRk{0};
 static std::map<uint64_t, int> peerRk;  // under mu: each plugin player's biggest range, from its hellos
 static std::map<int64_t, float> vehMass;  // under mu: kg by Net_VehicleId, read on the game thread
+static double rHand = 3, r2t = 10, r5t = 15, r12t = 20, rHeavy = 25, rBoat = 20, rShip = 60;  // [Range], km
 static double rangeFor(uintptr_t veh, float kg) {
-    if (isBoatVehicle(veh)) return kg > 50000 ? 60 : 20;
-    return kg <= 0 ? 10 : kg <= 2000 ? 10 : kg <= 5000 ? 15 : kg <= 12000 ? 20 : 25;
+    if (isBoatVehicle(veh)) return kg > 50000 ? rShip : rBoat;
+    return kg <= 0 ? r2t : kg <= 2000 ? r2t : kg <= 5000 ? r5t : kg <= 12000 ? r12t : rHeavy;
 }
-static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME, kVoice = 'G';  // Ctrl+End = channel down, Ctrl+Home = panel
+struct Hotkey { int vk = 0; bool ctrl = false, shift = false, alt = false; };
+static std::string keyNames[4];  // as the ini spells them, for the panel
+static Hotkey kTalk, kUp, kDown, kPanel;
+static int kVoice = 'G';  // the game's push-to-talk, pressed for us (no modifiers); 0 = ToggleSpeaking instead
+// "Ctrl+End", "Home", "F5", "G", "Numpad3" or a Windows key code ("36"); vk 0 if it is none of those
+static Hotkey parseKey(std::wstring s) {
+    Hotkey k;
+    for (auto& c : s) c = (wchar_t)towupper(c);
+    for (;;) {
+        size_t plus = s.find(L'+');
+        if (plus == std::wstring::npos || plus + 1 >= s.size()) break;
+        std::wstring m = s.substr(0, plus);
+        while (!m.empty() && m.back() == L' ') m.pop_back();
+        if (m == L"CTRL" || m == L"CONTROL") k.ctrl = true; else if (m == L"SHIFT") k.shift = true; else if (m == L"ALT") k.alt = true;
+        s = s.substr(plus + 1);
+    }
+    while (!s.empty() && s.front() == L' ') s.erase(0, 1);
+    while (!s.empty() && s.back() == L' ') s.pop_back();
+    static const struct { const wchar_t* n; int vk; } names[] = {
+        {L"HOME", VK_HOME}, {L"END", VK_END}, {L"INSERT", VK_INSERT}, {L"INS", VK_INSERT}, {L"DELETE", VK_DELETE}, {L"DEL", VK_DELETE},
+        {L"PAGEUP", VK_PRIOR}, {L"PAGEDOWN", VK_NEXT}, {L"UP", VK_UP}, {L"DOWN", VK_DOWN}, {L"LEFT", VK_LEFT}, {L"RIGHT", VK_RIGHT},
+        {L"SPACE", VK_SPACE}, {L"TAB", VK_TAB}, {L"CAPSLOCK", VK_CAPITAL}, {L"PAUSE", VK_PAUSE}, {L"SCROLLLOCK", VK_SCROLL},
+        {L"MOUSE4", VK_XBUTTON1}, {L"MOUSE5", VK_XBUTTON2}, {L"MIDDLEMOUSE", VK_MBUTTON}, {L"BACKSPACE", VK_BACK}, {L"ENTER", VK_RETURN}};
+    for (auto& n : names) if (s == n.n) { k.vk = n.vk; return k; }
+    if (s.size() >= 2 && s[0] == L'F' && iswdigit(s[1])) { int f = _wtoi(s.c_str() + 1); if (f >= 1 && f <= 24) k.vk = VK_F1 + f - 1; return k; }
+    if (s.rfind(L"NUMPAD", 0) == 0 && s.size() == 7 && iswdigit(s[6])) { k.vk = VK_NUMPAD0 + (s[6] - L'0'); return k; }
+    if (s.size() == 1 && (iswalpha(s[0]) || iswdigit(s[0]))) { k.vk = s[0]; return k; }
+    if (!s.empty() && std::all_of(s.begin(), s.end(), [](wchar_t c) { return iswdigit(c) != 0; })) { k.vk = _wtoi(s.c_str()); if (k.vk > 254) k.vk = 0; }
+    return k;
+}
+// held now, with exactly its modifiers (so Home is not Ctrl+Home)
+static bool held(const Hotkey& k) {
+    if (!k.vk || !(GetAsyncKeyState(k.vk) & 0x8000)) return false;
+    auto on = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
+    return on(VK_CONTROL) == k.ctrl && on(VK_SHIFT) == k.shift && on(VK_MENU) == k.alt;
+}
+// a [Keys] entry: its default declared by name, an old bare key code from before still read
+static Hotkey keyFrom(const wchar_t* name, const wchar_t* def) {
+    iniSet(INI, L"Keys", name, def);
+    std::wstring v = iniGet(INI, L"Keys", name);
+    Hotkey k = parseKey(v.empty() ? def : v);
+    if (!k.vk) { MT_LOG("[Keys] %ls=%ls is not a key -- using %ls", name, v.c_str(), def); k = parseKey(def); }
+    return k;
+}
 static std::wstring micDev, spkDev;  // devices by name ("" = the system's default)
 static std::atomic<bool> reopenOut{false};
 static int footKhz = 27185, gameVoice = 1;  // the handheld's own frequency; key the game's voice too
@@ -153,9 +206,28 @@ static void loadSettings() {
     micGain = iniInt(INI, L"Radio", L"MicGain", 100); roger = iniInt(INI, L"Radio", L"RogerBeep", 1);
     iniSet(INI, L"Radio", L"MicDevice", L""); iniSet(INI, L"Radio", L"SpeakerDevice", L"");
     micDev = iniGet(INI, L"Radio", L"MicDevice"); spkDev = iniGet(INI, L"Radio", L"SpeakerDevice");
-    kTalk = iniInt(INI, L"Keys", L"Talk", VK_HOME); kNext = iniInt(INI, L"Keys", L"Channel", VK_END);
-    kPanel = iniInt(INI, L"Keys", L"Panel", VK_HOME);
-    kVoice = iniInt(INI, L"Keys", L"GameVoice", 'G');  // the game's push-to-talk; 0 = ToggleSpeaking instead
+    // keys by name; an old file's bare codes (Talk=36) still read. The old Channel / Panel codes went with Ctrl.
+    std::wstring oldCh = iniGet(INI, L"Keys", L"Channel");
+    if (!oldCh.empty() && iniGet(INI, L"Keys", L"ChannelUp").empty()) iniSet(INI, L"Keys", L"ChannelUp", oldCh.c_str(), true);
+    if (iniGet(INI, L"Keys", L"Panel") == L"36") iniSet(INI, L"Keys", L"Panel", L"Ctrl+Home", true);
+    if (iniGet(INI, L"Keys", L"Talk") == L"36") iniSet(INI, L"Keys", L"Talk", L"Home", true);
+    if (iniGet(INI, L"Keys", L"ChannelUp") == L"35") iniSet(INI, L"Keys", L"ChannelUp", L"End", true);
+    if (iniGet(INI, L"Keys", L"GameVoice") == L"71") iniSet(INI, L"Keys", L"GameVoice", L"G", true);
+    kTalk = keyFrom(L"Talk", L"Home"); kUp = keyFrom(L"ChannelUp", L"End"); kDown = keyFrom(L"ChannelDown", L"Ctrl+End");
+    kPanel = keyFrom(L"Panel", L"Ctrl+Home");
+    for (auto [k, out] : {std::pair<const wchar_t*, std::string*>{L"Talk", &keyNames[0]}, {L"ChannelUp", &keyNames[1]}, {L"ChannelDown", &keyNames[2]}, {L"Panel", &keyNames[3]}})
+        *out = utf8(iniGet(INI, L"Keys", k));
+    iniSet(INI, L"Keys", L"GameVoice", L"G");
+    { std::wstring gv = iniGet(INI, L"Keys", L"GameVoice"); kVoice = gv.empty() ? 0 : parseKey(gv).vk; }
+    iniInt(INI, L"Panel", L"Port", 8095);  // declared now, so the file shows it from the first launch
+    rHand = iniNum(INI, L"Range", L"Handheld", 3); r2t = iniNum(INI, L"Range", L"UpTo2t", 10); r5t = iniNum(INI, L"Range", L"UpTo5t", 15);
+    r12t = iniNum(INI, L"Range", L"UpTo12t", 20); rHeavy = iniNum(INI, L"Range", L"Heavy", 25);
+    rBoat = iniNum(INI, L"Range", L"Boat", 20); rShip = iniNum(INI, L"Range", L"Ship", 60);
+    for (double* r : {&rHand, &r2t, &r5t, &r12t, &rHeavy, &rBoat, &rShip}) *r = *r < 0.5 ? 0.5 : *r > 250 ? 250 : *r;  // km; one byte in a packet
+    // settings from before frequencies and two radios: gone, so the file says only what is read
+    std::wstring path = iniPath(INI);
+    for (const wchar_t* k : {L"Channel", L"Code", L"Handheld", L"RangeKm", L"Presets"}) WritePrivateProfileStringW(L"Radio", k, nullptr, path.c_str());
+    WritePrivateProfileStringW(L"Keys", L"Channel", nullptr, path.c_str());
 }
 // [Debug]: LoopbackKm (>= 0: everything we send also goes to our own Steam id and comes back as a station that far off), TalkFile (an 8 kHz mono
 // 16-bit wav spoken instead of the mic), RecordOut (the speaker's output appended to a raw s16le 8 kHz file).
@@ -402,7 +474,7 @@ static void scanWorld() {
         } else cb.hear = 0;
     }
     Rig& ht = rig[HT];
-    ht.avail = carried; ht.range = 3; ht.x = myX; ht.y = myY; ht.hear = 1;
+    ht.avail = carried; ht.range = rHand; ht.x = myX; ht.y = myY; ht.hear = 1;
     myRk = (int)fmax(cb.avail ? cb.range : 0, ht.avail ? ht.range : 0);
     if (id != myVeh && (id || !in)) {  // got in, changed vehicle, or got out
         myVeh = id;
@@ -771,26 +843,27 @@ static void keyThread() {
     int sentOn = 0;  // the rigs the current over went out on: its end goes to the same
     while (!api->stopping()) {
         bool f = gameFocused() && !chatOpen, ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-        bool key = f && !ctl && (GetAsyncKeyState(kTalk) & 0x8000);
+        bool key = f && held(kTalk);
         int txs;  // the rigs this over goes out on (bit CB, bit HT)
         { std::lock_guard<std::mutex> g(mu);
           bool cbOk = inVehicle && rig[CB].avail && rig[CB].on, htOk = carried && rig[HT].on;
           txs = inVehicle ? ((txMode != 1 && cbOk ? 1 : 0) | (txMode != 0 && htOk ? 2 : 0)) : (htOk ? 2 : 0);
           if (inVehicle && !txs) txs = cbOk ? 1 : htOk ? 2 : 0; }  // the chosen rig is off: the other one
         bool want = key && (txs || parrot);
-        bool nx = f && (GetAsyncKeyState(kNext) & 0x8000) != 0, pn = f && ctl && (GetAsyncKeyState(kPanel) & 0x8000) != 0;
+        bool up = f && held(kUp), dn = f && held(kDown), nx = up || dn, pn = f && held(kPanel);
         if (nx && !nextDown) {
+            bool down = dn;
             int c;
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
               int r = activeRig(), khz = rig[r].khz;
               int best = chOf(khz);
-              if (best) best = ctl ? (best + 38) % 40 + 1 : best % 40 + 1;
+              if (best) best = down ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
                   for (int i = 1; i <= 40; i++) {
                       int k = chKhz(i);
-                      if (ctl ? (k < khz && (!best || k > chKhz(best))) : (k > khz && (!best || k < chKhz(best)))) best = i;
+                      if (down ? (k < khz && (!best || k > chKhz(best))) : (k > khz && (!best || k < chKhz(best)))) best = i;
                   }
-                  if (!best) best = ctl ? 40 : 1;
+                  if (!best) best = down ? 40 : 1;
               }
               rig[r].khz = chKhz(best); c = best; radioChanged(r); notice(label(rig[r].khz) + (r == HT ? "  (handheld)" : "")); }
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
@@ -938,6 +1011,8 @@ static std::string stateJson() {
         snprintf(b, sizeof b, "%s%.2f", first ? "" : ",", e.second.s);
         j += b; first = false;
     }
+    j += "],\"keys\":[";
+    for (int i = 0; i < 4; i++) j += (i ? ",\"" : "\"") + jesc(keyNames[i]) + "\"";
     snprintf(b, sizeof b, "],\"range\":%.0f,\"scope\":[", myRange());  // no count of rigs in range: a CB cannot know it
     j += b;
     for (int i = 0; i < 64; i++) { snprintf(b, sizeof b, "%s%.3f", i ? "," : "", scope[i]); j += b; }
@@ -1010,7 +1085,8 @@ static bool selfCheck() {
     for (int v = -32000; v <= 32000; v += 97) { int d = ulawDec(ulawEnc((int16_t)v)) - v; if (abs(d) > 1100 || (abs(v) < 200 && abs(d) > 20)) return false; }
     if (chKhz(19) != 27185 || chKhz(9) != 27065 || chKhz(40) != 27405 || chKhz(23) != 27255 || chOf(27190) || chOf(27185) != 19) return false;
     if (snapKhz(27187) != 27185 || snapKhz(27188) != 27190 || snapKhz(1) != KHZ_MIN || snapKhz(99999) != KHZ_MAX) return false;
-    if (rangeFor(0, 1500) != 10 || rangeFor(0, 2500) != 15 || rangeFor(0, 9000) != 20 || rangeFor(0, 30000) != 25) return false;
+    if (parseKey(L"Ctrl+End").vk != VK_END || !parseKey(L"ctrl + end").ctrl || parseKey(L"Home").vk != VK_HOME || parseKey(L"36").vk != 36
+        || parseKey(L"F5").vk != VK_F5 || parseKey(L"g").vk != 'G' || parseKey(L"Numpad3").vk != VK_NUMPAD3 || parseKey(L"nope").vk) return false;
     return signalAt(0, 10) == 1 && signalAt(10, 10) == 0 && signalAt(5, 10) > 0.5f && signalAt(5, 10) < 0.8f && signalAt(1, 0) == 0;
 }
 
