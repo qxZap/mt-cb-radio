@@ -65,6 +65,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include "../include/mt_plugin.hpp"
 
 using namespace mt;
@@ -441,14 +442,21 @@ static void scanWorld() {
     if (GetTickCount() - lastFull > 3000) {  // the full object walk, every 3 s; positions every pass
         lastFull = GetTickCount();
         states.clear(); vehicles.clear(); pc = 0; chat = 0;
+        static std::unordered_map<uintptr_t, uint8_t> kind;  // class -> 0 none, 1 player state, 2 vehicle, 3 controller, 4 chat
         for (int i = 0, n = api->num_objects(); i < n; i++) {
             uintptr_t o = api->object(i);
-            if (!o || isCDO(o)) continue;
+            if (!o) continue;
             uintptr_t c = classOf(o);
-            if (c == cPS || (cPS && api->is_a(c, cPS))) states.push_back(o);
-            else if (cVeh && api->is_a(c, cVeh)) vehicles.push_back(o);
-            else if (!pc && (c == cPC || api->is_a(c, cPC))) { pc = o; pcIdx = i; }
-            else if (!chat && cChat && api->is_a(c, cChat) && oChatText >= 0 && get<uintptr_t>(o + oChatText)) chat = o;  // the menu's has no text box
+            auto k = kind.find(c);
+            if (k == kind.end()) {
+                uint8_t v = cPS && api->is_a(c, cPS) ? 1 : cVeh && api->is_a(c, cVeh) ? 2 : cPC && api->is_a(c, cPC) ? 3 : cChat && api->is_a(c, cChat) ? 4 : 0;
+                k = kind.emplace(c, v).first;
+            }
+            if (!k->second || isCDO(o)) continue;
+            if (k->second == 1) states.push_back(o);
+            else if (k->second == 2) vehicles.push_back(o);
+            else if (k->second == 3) { if (!pc) { pc = o; pcIdx = i; } }
+            else if (!chat && oChatText >= 0 && get<uintptr_t>(o + oChatText)) chat = o;  // the menu's has no text box
         }
         std::vector<Player> found;
         uintptr_t mine = pc ? get<uintptr_t>(pc + oCtrlPS) : 0;
@@ -477,13 +485,18 @@ static void scanWorld() {
     }
     // a passenger's pawn is the character: find the vehicle whose seats hold it
     uintptr_t in = veh ? pawn : 0;
-    if (!in && pawn && oSeats >= 0 && oSeatChar >= 0 && seatStride)
+    static uintptr_t seatIn; static DWORD seatAt;  // the seats are searched 4 times a second, not every pass
+    if (!in && pawn && GetTickCount() - seatAt < 250) in = seatIn;
+    else if (!in && pawn && oSeats >= 0 && oSeatChar >= 0 && seatStride) {
+      seatAt = GetTickCount();
         for (uintptr_t v : vehicles) {
             struct { uintptr_t data; int num, max; } arr{};
             if (!rd(v + oSeats, &arr, sizeof arr) || arr.num <= 0 || arr.num > 16 || !arr.data) continue;
             for (int i = 0; i < arr.num && !in; i++) { uintptr_t ch = 0; if (rd(arr.data + i * seatStride + oSeatChar, &ch, 8) && ch == pawn) in = v; }
             if (in) break;
         }
+      seatIn = in;
+    }
     int64_t id = 0;
     if (in && oVehId >= 0) rd(in + oVehId, &id, 8);
     // on foot: the CB Handheld in the hand (its name enters the pool once the item table has loaded)
@@ -1261,7 +1274,8 @@ static void overlayKeep(void*) {
     if (oR < 0) return;
     api->process_event(overlayWeb, fGet, p);
     memcpy(&got, p + oR, sizeof got);
-    bool ours = got.d && got.n > 0 && wcsstr(got.d, L"127.0.0.1");
+    if (!got.d || got.n <= 1) return;  // still loading: leave it (reloading here every pass was a 70 ms hitch each, 11-21)
+    bool ours = wcsstr(got.d, L"127.0.0.1") != nullptr;
     if (!ours) {
         unsigned char a[32] = {}; memcpy(a, &overlayUrl.s, sizeof overlayUrl.s);
         api->process_event(overlayWeb, fLoad, a);
@@ -1323,7 +1337,7 @@ static void overlayMake(void*) {
         } else MT_LOG("overlay: the browser's slot was not found -- it keeps the leaderboard's size");
     }
     overlay = w; overlayWeb = web; overlayAt = GetTickCount(); overlayIdx = -1;
-    for (int i = 0, n = api->num_objects(); i < n; i++) if (api->object(i) == w) { overlayIdx = i; break; }
+    overlayIdx = get<int32_t>(w + L().obj_index);  // its own slot in the object array
     MT_LOG("overlay: made, hidden, the panel loading in it (browser %s)", web ? "found" : "NOT found");
 }
 static void inputMode(bool ui) {
@@ -1434,7 +1448,6 @@ static DWORD WINAPI run(LPVOID) {
     std::thread(keyThread).detach();
     std::thread(panelThread).detach();
     if (steam.nm) std::thread(netThread).detach();
-    DWORD shopAt = 0;
     while (!api->stopping()) {
         // Closing: the game drops its world and its window before it shuts Steam down, and Steam's unloaded crash
         // handler makes any fault after that a crash (crashhandler64.dll_unloaded on every close, 11-21). So Steam is
@@ -1451,15 +1464,13 @@ static DWORD WINAPI run(LPVOID) {
             steamGone = true; MT_LOG("the game window closed: the radio stops before Steam does");
             break;
         }
-        if (!shopAt && gPC) shopAt = GetTickCount() + 20000;
-        if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
         if (slow && any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
         static DWORD worldAt;
         if (!gPC) worldAt = 0; else if (!worldAt) worldAt = GetTickCount();
         if (inGamePanel && slow && worldAt && GetTickCount() - worldAt > 4000 && !overlay && api->game_thread_ready()) api->run_on_game_thread(overlayMake, nullptr);
         if (!gPC && overlay) { overlay = 0; overlayIdx = -1; overlayOn = false; }  // the world went, and the widget with it
-        if (overlay && GetTickCount() - overlayAt < 15000 && api->game_thread_ready()) api->run_on_game_thread(overlayKeep, nullptr);  // the leaderboard's own load comes late
+        if (overlay && tick % 10 == 0 && GetTickCount() - overlayAt < 15000 && api->game_thread_ready()) api->run_on_game_thread(overlayKeep, nullptr);  // twice a second: the leaderboard's own load comes late
         if (slow && gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
         Sleep(50);
     }
