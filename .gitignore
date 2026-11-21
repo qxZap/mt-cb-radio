@@ -1,0 +1,3 @@
+out/
+plugins/*.inc
+__pycache__/
