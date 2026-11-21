@@ -391,6 +391,9 @@ if(location.search.includes("selftest"))setTimeout(()=>{
  const out=[];let first=null;
  for(const v of ["cb","ht"])for(const c of cases){st=Object.assign(JSON.parse(JSON.stringify(base)),c);view=v;lastLoc="veh";draw();document.getElementById("htView").hidden=false;document.getElementById("cbView").hidden=false;
   const b=box().join(" ");if(first===null)first=b;if(b!==first)out.push(v+" "+JSON.stringify(c)+" -> "+b)}
+ for(const e of ["1","27","271","2718","27185"]){entry=e;st=JSON.parse(JSON.stringify(base));view="ht";draw();document.getElementById("htView").hidden=false;document.getElementById("cbView").hidden=false;
+  const b=box().join(" ");if(b!==first)out.push("entry "+e+" -> "+b)}
+ entry="";
  document.body.setAttribute("data-selftest",out.length?"MOVED: "+first+" || "+out.join(" | "):"OK "+first);
 },0);else{setInterval(poll,120);poll()}
 

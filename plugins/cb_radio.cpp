@@ -39,7 +39,8 @@
 //   [Keys]    Talk=Home  ChannelUp=End  ChannelDown=Ctrl+End  Panel=Ctrl+Home   a key name, Ctrl+/Shift+/Alt+ in front,
 //             or a Windows key code (36); GameVoice=G, the game's own voice key held while you talk (empty = none)
 //   [Panel]   Port=8095                     the browser panel's port (the next free one if it is taken)
-//   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=20 Ship=60   km, this rig's own (a link uses
+//   [Range]   Handheld=3 UpTo2t=10 UpTo5t=15 UpTo12t=20 Heavy=25 Boat=30 Ship=100 (tugs) BigShip=1000 (tankers,
+//             container ships, ferries)   km, this rig's own (a link uses
 //             the smaller of the two rigs)
 //   [Radio]   Frequency (kHz), Volume, Squelch, MicGain, RogerBeep, GameVoice, Transmit (0 CB, 1 handheld, 2 both),
 //             CBOn, HandheldOn, MicDevice, SpeakerDevice
@@ -89,12 +90,20 @@ static Rig rig[2];        // under mu
 static int txMode = 0;    // in the cab: 0 the CB, 1 the handheld, 2 both. On foot always the handheld
 static bool carried;      // the handheld has been in the hand once ([Radio] HaveHandheld keeps it across sessions)
 static int panelMode = 0; // the panel: 0 detailed, 1 simple ([Panel] Mode)
-static std::atomic<int> myRk{0};
+static std::atomic<int> myRk{0};  // km, the biggest rig we have (a hello's range)
 static std::map<uint64_t, int> peerRk;  // under mu: each plugin player's biggest range, from its hellos
 static std::map<int64_t, float> vehMass;  // under mu: kg by Net_VehicleId, read on the game thread
-static double rHand = 3, r2t = 10, r5t = 15, r12t = 20, rHeavy = 25, rBoat = 20, rShip = 60;  // [Range], km
+static double rHand = 3, r2t = 10, r5t = 15, r12t = 20, rHeavy = 25, rBoat = 30, rShip = 100, rBigShip = 1000;  // [Range], km
 static double rangeFor(uintptr_t veh, float kg) {
-    if (isBoatVehicle(veh)) return kg > 50000 ? rShip : rBoat;
+    if (isBoatVehicle(veh)) {  // by what it is (a boat's body often reports no mass) and by mass, the bigger of the two
+        std::string n = objName(classOf(veh));
+        for (auto& c : n) c = (char)tolower((unsigned char)c);
+        auto has = [&](const char* w) { return n.find(w) != std::string::npos; };
+        double byName = has("tanker") || has("containership") || has("cargoship") || has("ship_") || has("ferry") ? rBigShip
+                        : has("tug") ? rShip : rBoat;
+        double byMass = kg > 1000000 ? rBigShip : kg > 50000 ? rShip : kg > 0 ? rBoat : 0;
+        return fmax(byName, byMass);
+    }
     return kg <= 0 ? r2t : kg <= 2000 ? r2t : kg <= 5000 ? r5t : kg <= 12000 ? r12t : rHeavy;
 }
 struct Hotkey { int vk = 0; bool ctrl = false, shift = false, alt = false; };
@@ -228,8 +237,10 @@ static void loadSettings() {
     iniInt(INI, L"Panel", L"Port", 8095);  // declared now, so the file shows it from the first launch
     rHand = iniNum(INI, L"Range", L"Handheld", 3); r2t = iniNum(INI, L"Range", L"UpTo2t", 10); r5t = iniNum(INI, L"Range", L"UpTo5t", 15);
     r12t = iniNum(INI, L"Range", L"UpTo12t", 20); rHeavy = iniNum(INI, L"Range", L"Heavy", 25);
-    rBoat = iniNum(INI, L"Range", L"Boat", 20); rShip = iniNum(INI, L"Range", L"Ship", 60);
-    for (double* r : {&rHand, &r2t, &r5t, &r12t, &rHeavy, &rBoat, &rShip}) *r = *r < 0.5 ? 0.5 : *r > 250 ? 250 : *r;  // km; one byte in a packet
+    if (iniGet(INI, L"Range", L"Boat") == L"20") iniSet(INI, L"Range", L"Boat", L"30", true);   // the old defaults move up
+    if (iniGet(INI, L"Range", L"Ship") == L"60") iniSet(INI, L"Range", L"Ship", L"100", true);
+    rBoat = iniNum(INI, L"Range", L"Boat", 30); rShip = iniNum(INI, L"Range", L"Ship", 100); rBigShip = iniNum(INI, L"Range", L"BigShip", 1000);
+    for (double* r : {&rHand, &r2t, &r5t, &r12t, &rHeavy, &rBoat, &rShip, &rBigShip}) *r = *r < 0.5 ? 0.5 : *r > 5000 ? 5000 : *r;  // km
     // settings from before frequencies and two radios: gone, so the file says only what is read
     std::wstring path = iniPath(INI);
     for (const wchar_t* k : {L"Channel", L"Code", L"Handheld", L"RangeKm", L"Presets"}) WritePrivateProfileStringW(L"Radio", k, nullptr, path.c_str());
@@ -491,7 +502,7 @@ static void scanWorld() {
             notice(label(cb.khz) + "  (this vehicle's CB)");
             helloNow = true;
         }
-        MT_LOG("vehicle %lld: CB on %d kHz", (long long)id, cb.khz);
+        MT_LOG("vehicle %lld (%s): CB on %d kHz", (long long)id, in ? objName(classOf(in)).c_str() : "-", cb.khz);
     }
 }
 // under mu: a rig was retuned. The CB's frequency is its vehicle's (and the passengers'), the handheld's is ours.
@@ -538,7 +549,7 @@ struct Identity { int type = 16, size = 8; uint64_t sid; char rest[120] = {0}; }
 static_assert(sizeof(Identity) == 136, "SteamNetworkingIdentity is 136 bytes");
 
 #pragma pack(push, 1)
-struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key; float x, y; uint8_t rk, rsv; uint8_t ulaw[FRAME]; };
+struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key; float x, y; uint16_t rk; uint8_t ulaw[FRAME]; };
 enum { F_REPLY = 1, F_ROGER = 2, F_HT = 4 };  // flags: a hello's answer; an over ended with the roger beep; sent from a handheld
 #pragma pack(pop)
 enum { P_HELLO = 1, P_VOICE = 2, P_END = 3 };
@@ -556,7 +567,7 @@ static void fillHello(Packet& p) {  // under mu
 static void sendTo(uint64_t sid, const Packet& p, int n) {
     if (!steamOk()) return;
     Identity id; id.sid = sid;
-    Packet q = p; if (!q.rk) q.rk = (uint8_t)myRk.load();  // the sending rig's range (a hello: the biggest we have)
+    Packet q = p; if (!q.rk) q.rk = (uint16_t)myRk.load();  // the sending rig's range (a hello: the biggest we have)
     steam.send(steam.nm, &id, &q, (uint32_t)n, 1 | 32, STEAM_CHANNEL);  // unreliable, no Nagle, restart broken sessions
 }
 
@@ -610,6 +621,7 @@ struct Station {
     int crackN = 0, hop = 0;
     bool off = false;  // tuned 5 kHz away: AM splatter
     float spl = 0;
+    uint16_t lastSeq = 0xFFFF;
     Band hiss;
     Rng r;
     std::string name;
@@ -667,7 +679,7 @@ static void mix(float* out) {
         if (t.st != Station::IDLE) open++;
         for (int i = 0; i < FRAME && t.st != Station::IDLE; i++) {
             float v = sample(t, i, have ? f.data() : nullptr);
-            if (!talking || it->first == 4 || it->first == 5) out[i] += v * t.gain;  // half duplex: keying up drowns everything else (not the loopback test)
+            if (!talking || it->first == 2) out[i] += v * t.gain;  // half duplex: keying up drowns everything else (not the loopback test)
             if (t.st == Station::CHUNK && --t.n <= 0) t.st = Station::VOICE;
             else if (t.st == Station::ROGER && --t.n <= 0) { t.st = Station::TAIL; t.n = SR * 170 / 1000; }
             else if (t.st == Station::TAIL && --t.n <= 0) { t.st = Station::IDLE; t.ended = false; t.q.clear(); }
@@ -736,7 +748,7 @@ static void received(uint64_t from, const Packet& p, int n) {
     if (from == mySid) {
         static bool said; if (!said) MT_LOG("steam: a message to ourselves came back -- the transport works end to end"); said = true;
         if (loopKm < 0 || p.type == P_HELLO) return;
-        Packet q = p; q.x += (float)(loopKm * 100000); received(2, q, n); return;  // the loopback test, through Steam (stations 4, 5)
+        Packet q = p; q.x += (float)(loopKm * 100000); received(2, q, n); return;  // the loopback test, through Steam (station 2)
     }
     std::lock_guard<std::mutex> g(mu);
     double km = hypot(p.x - myX, p.y - myY) / 100000.0;
@@ -774,10 +786,12 @@ static void received(uint64_t from, const Packet& p, int n) {
         float sr = signalAt(km2, link) * (d ? 0.45f : 1);
         if (sr * g.hear > s * gain) { s = sr; gain = g.hear; df = d; km = km2; }
     }
-    uint64_t key = from * 2 + ((p.flags & F_HT) ? 1 : 0);  // a player's CB and handheld are two stations
+    uint64_t key = from;  // a player's CB and handheld in one: an over sent on both is heard once, at the stronger
     auto it = stations.find(key);
     if (s <= 0 || (it == stations.end() && s * 100 < squelchPct)) return;  // out of range, or under the squelch
     Station& t = stations[key];
+    if (p.type == P_VOICE && t.lastSeq == p.seq && GetTickCount() - t.last < 1000) return;  // its other rig's copy
+    if (p.type == P_VOICE) t.lastSeq = p.seq;
     t.gain = gain;
     if (t.name.empty()) { t.r.s ^= (uint32_t)from; t.rate = 0.7f + 1.3f * t.r.uni(); for (auto& pl : players) if (pl.sid == from) t.name = pl.name; if (from == 2) t.name = "Loopback"; }
     t.s = s; t.dist = (float)km; t.last = GetTickCount(); t.off = df != 0;
@@ -853,8 +867,8 @@ static void keyThread() {
         int txs;  // the rigs this over goes out on (bit CB, bit HT)
         { std::lock_guard<std::mutex> g(mu);
           bool cbOk = inVehicle && rig[CB].avail && rig[CB].on, htOk = carried && rig[HT].on;
-          txs = inVehicle ? ((txMode != 1 && cbOk ? 1 : 0) | (txMode != 0 && htOk ? 2 : 0)) : (htOk ? 2 : 0);
-          if (inVehicle && !txs) txs = cbOk ? 1 : htOk ? 2 : 0; }  // the chosen rig is off: the other one
+          txs = inVehicle ? ((txMode != 1 && cbOk ? 1 : 0) | (txMode != 0 && htOk ? 2 : 0)) : (htOk ? 2 : 0); }
+          // the chosen rig off: nothing goes out and nothing beeps (11-21); Both with one off: that one alone, one beep
         bool want = key && (txs || parrot);
         bool up = f && held(kUp), dn = f && held(kDown), nx = up || dn, pn = f && held(kPanel);
         if (nx && !nextDown) {
@@ -903,7 +917,7 @@ static void keyThread() {
                 for (int r = 0; r < 2; r++) {
                     if (!(txs >> r & 1)) continue;
                     out[r] = Packet{MAGIC, P_VOICE, (uint8_t)(r == HT ? F_HT : 0), 0, (uint32_t)rig[r].khz};
-                    out[r].x = (float)myX; out[r].y = (float)myY; out[r].rk = (uint8_t)rig[r].range;
+                    out[r].x = (float)myX; out[r].y = (float)myY; out[r].rk = (uint16_t)rig[r].range;
                     for (auto& e : peers) if (e.second.second <= rig[r].range * 1.15) dest[r].push_back(e.first);
                 }
             }
@@ -945,7 +959,7 @@ static void keyThread() {
                     if (!(sentOn >> r & 1)) continue;
                     Packet e{MAGIC, P_END, (uint8_t)((roger ? F_ROGER : 0) | (r == HT ? F_HT : 0)), sq, 0};
                     std::vector<uint64_t> to;
-                    { std::lock_guard<std::mutex> g(mu); e.key = (uint32_t)rig[r].khz; e.x = (float)myX; e.y = (float)myY; e.rk = (uint8_t)rig[r].range;
+                    { std::lock_guard<std::mutex> g(mu); e.key = (uint32_t)rig[r].khz; e.x = (float)myX; e.y = (float)myY; e.rk = (uint16_t)rig[r].range;
                       for (auto& pe : peers) if (pe.second.second <= rig[r].range * 1.15) to.push_back(pe.first); }
                     for (uint64_t sid : to) sendTo(sid, e, HEAD);
                     if (loopKm >= 0) sendTo(mySid, e, HEAD);
