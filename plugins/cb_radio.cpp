@@ -131,7 +131,9 @@ static Hotkey parseKey(std::wstring s) {
 static bool held(const Hotkey& k) {
     if (!k.vk || !(GetAsyncKeyState(k.vk) & 0x8000)) return false;
     auto on = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
-    return on(VK_CONTROL) == k.ctrl && on(VK_SHIFT) == k.shift && on(VK_MENU) == k.alt;
+    // a modifier the key names must be down; Ctrl and Alt it does not name must be up (Home is not Ctrl+Home). Shift
+    // only counts when named: it is the run key, and holding it cut the talk key off mid-over (11-21)
+    return on(VK_CONTROL) == k.ctrl && on(VK_MENU) == k.alt && (!k.shift || on(VK_SHIFT));
 }
 // a [Keys] entry: its default declared by name, an old bare key code from before still read
 static Hotkey keyFrom(const wchar_t* name, const wchar_t* def) {
@@ -461,7 +463,7 @@ static void scanWorld() {
     }
     std::lock_guard<std::mutex> g(mu);
     if (hold != holding) MT_LOG("handheld %s", hold ? "in hand" : "put away");
-    if (hold && !carried) { carried = true; saveSettings(); notice(label(rig[HT].khz) + "  (handheld)"); }
+    if (hold && !carried) { carried = true; saveSettings(); notice(label(rig[HT].khz) + "  (ham radio)"); }
     myX = p[0]; myY = p[1]; inVehicle = in != 0; holding = hold;
     Rig& cb = rig[CB];
     if (cbId) {
@@ -626,11 +628,11 @@ static float sample(Station& t, int i, const int16_t* f) {
     float s = t.s, h = t.r.gauss(), out = 0, noise = t.hiss.run(h) * (0.03f + 0.32f * powf(1 - s, 1.6f));
     if (t.st == Station::CHUNK || t.st == Station::TAIL) {
         float k = t.st == Station::TAIL ? t.n / (SR * 0.17f) : 1;
-        return t.hiss.run(h) * (0.35f + 0.25f * (1 - s)) * (0.2f + 0.8f * k) * 0.8f;
+        return t.hiss.run(h) * (0.35f + 0.25f * (1 - s)) * (0.2f + 0.8f * k) * 0.8f * 0.4f;  // 60% down (11-21)
     }
     if (t.st == Station::ROGER) {
         int at = SR * 160 / 1000 - t.n, a = SR * 70 / 1000;
-        return (at < a ? tone(1200, at, a, 0.4f) : tone(900, at - a, SR * 90 / 1000, 0.4f)) * (0.5f + 0.5f * s);
+        return (at < a ? tone(1200, at, a, 0.16f) : tone(900, at - a, SR * 90 / 1000, 0.16f)) * (0.5f + 0.5f * s);
     }
     float x = f ? f[i] / 32768.f : 0;
     if (t.off) { t.spl += 2 * 3.14159265f * 170 / SR; x = tanhf(4 * x) * 0.5f * (0.55f + 0.45f * sinf(t.spl)); }
@@ -673,7 +675,7 @@ static void mix(float* out) {
         ++it;
     }
     if (open >= 2 && !talking)  // two carriers on one channel: the heterodyne
-        for (int i = 0; i < FRAME; i++) out[i] += 0.05f * sinf(2 * 3.14159265f * 1100 * (now * 8 + i) / SR);
+        for (int i = 0; i < FRAME; i++) out[i] += 0.02f * sinf(2 * 3.14159265f * 1100 * (now * 8 + i) / SR);
     size_t k = local.size() < FRAME ? local.size() : FRAME;
     for (size_t i = 0; i < k; i++) out[i] += local[i];
     local.erase(local.begin(), local.begin() + k);
@@ -685,7 +687,7 @@ static void localBeep(std::initializer_list<float> freqs, int ms = 45) {
     std::lock_guard<std::mutex> g(mu);
     for (float f : freqs) {
         int n = SR * ms / 1000;
-        for (int i = 0; i < n; i++) local.push_back(tone(f, i, n, 0.25f));
+        for (int i = 0; i < n; i++) local.push_back(tone(f, i, n, 0.1f));
         for (int i = 0; i < SR / 30; i++) local.push_back(0);
     }
 }
@@ -861,7 +863,7 @@ static void keyThread() {
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
               int r = activeRig(), khz = rig[r].khz;
               if (r == CB && !inVehicle) { notice("CB: get in the vehicle to tune its CB"); nextDown = true; continue; }
-              if (!rig[r].on) { notice(r == CB ? "CB: switched off" : "Handheld: switched off"); nextDown = true; continue; }
+              if (!rig[r].on) { notice(r == CB ? "CB: switched off" : "Ham radio: switched off"); nextDown = true; continue; }
               int best = chOf(khz);
               if (best) best = down ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
@@ -871,12 +873,12 @@ static void keyThread() {
                   }
                   if (!best) best = down ? 40 : 1;
               }
-              rig[r].khz = chKhz(best); c = best; radioChanged(r); notice(label(rig[r].khz) + (r == HT ? "  (handheld)" : "")); }
+              rig[r].khz = chKhz(best); c = best; radioChanged(r); notice(label(rig[r].khz) + (r == HT ? "  (ham radio)" : "")); }
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
         nextDown = nx; panelDown = pn;
-        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "CB: your handheld is switched off" : "CB: the rig is in your vehicle. On foot, hold a CB Handheld (tech store)"); }
+        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "Ham radio: switched off" : "CB: the rig is in your vehicle. On foot, take out a ham radio (tech store)"); }
         keyDown = key;
         if (want && !was) {  // key up
             WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
@@ -985,15 +987,12 @@ static std::string jesc(const std::string& s) {
     return o;
 }
 static std::string stateJson() {
-    static std::vector<std::wstring> mics, spks;  // asked again every few seconds: a headset plugged in mid-game shows up
-    static DWORD asked;
-    std::lock_guard<std::mutex> g(mu);  // also guards the two lists: every request has its own thread
-    if (!asked || GetTickCount() - asked > 3000) { asked = GetTickCount(); mics = devices(true); spks = devices(false); }
+    std::lock_guard<std::mutex> g(mu);
     char b[640];
     snprintf(b, sizeof b, "{\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,\"carried\":%d,\"txMode\":%d,\"mode\":%d,"
-             "\"parrot\":%d,\"parrotS\":%d,\"tx\":%d,\"txOn\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,",
+             "\"parrot\":%d,\"parrotS\":%d,\"tx\":%d,\"txOn\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,",
              volume, squelchPct, micGain, roger, holding ? 1 : 0, carried ? 1 : 0, txMode, panelMode, parrot, parrotS, talking ? 1 : 0, txOn.load(),
-             txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size());
+             txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0);
     std::string j = b;
     for (int r = 0; r < 2; r++) {
         const Rig& g = rig[r];
@@ -1003,14 +1002,8 @@ static std::string stateJson() {
                  r == CB ? "cb" : "ht", g.avail ? 1 : 0, g.on ? 1 : 0, g.khz, chOf(g.khz), g.range, g.hear);
         j += b;
     }
-    j += "\"micDev\":\"" + jesc(utf8(micDev)) + "\",\"spkDev\":\"" + jesc(utf8(spkDev)) + "\",\"mics\":[";
-    for (auto& d : mics) j += "\"" + jesc(utf8(d)) + "\",";
-    if (j.back() == ',') j.pop_back();
-    j += "],\"spks\":[";
-    for (auto& d : spks) j += "\"" + jesc(utf8(d)) + "\",";
-    if (j.back() == ',') j.pop_back();
-    // what a CB shows: the signal on the meter and how many rigs are in range -- never who is talking or where
-    j += "],\"rx\":[";
+    // what a CB shows: the signal on the meter -- never who is talking or where
+    j += "\"rx\":[";
     bool first = true;
     for (auto& e : stations) {
         if (e.second.st == Station::IDLE) continue;
@@ -1019,9 +1012,20 @@ static std::string stateJson() {
     }
     j += "],\"keys\":[";
     for (int i = 0; i < 4; i++) j += (i ? ",\"" : "\"") + jesc(keyNames[i]) + "\"";
-    snprintf(b, sizeof b, "],\"range\":%.0f,\"scope\":[", myRange());  // no count of rigs in range: a CB cannot know it
-    j += b;
-    for (int i = 0; i < 64; i++) { snprintf(b, sizeof b, "%s%.3f", i ? "," : "", scope[i]); j += b; }
+    snprintf(b, sizeof b, "],\"range\":%.0f}", myRange());  // no count of rigs in range: a CB cannot know it
+    return j + b;
+}
+// The sound devices, asked only when the panel opens its Audio section (enumerating them is the slow part).
+static std::string devicesJson() {
+    auto mics = devices(true), spks = devices(false);
+    std::wstring md, sd;
+    { std::lock_guard<std::mutex> g(mu); md = micDev; sd = spkDev; }
+    std::string j = "{\"micDev\":\"" + jesc(utf8(md)) + "\",\"spkDev\":\"" + jesc(utf8(sd)) + "\",\"mics\":[";
+    for (auto& d : mics) j += "\"" + jesc(utf8(d)) + "\",";
+    if (j.back() == ',') j.pop_back();
+    j += "],\"spks\":[";
+    for (auto& d : spks) j += "\"" + jesc(utf8(d)) + "\",";
+    if (j.back() == ',') j.pop_back();
     return j + "]}";
 }
 static bool apply(const std::string& q) {  // -> the radio was retuned (the click gets its beep)  // k=v&k=v
@@ -1057,7 +1061,7 @@ static bool apply(const std::string& q) {  // -> the radio was retuned (the clic
         at = amp + 1;
     }
     bool tuned = khz != was;
-    if (khz != was) { radioChanged(r); notice(label(khz) + (r == HT ? "  (handheld)" : "")); }
+    if (khz != was) { radioChanged(r); notice(label(khz) + (r == HT ? "  (ham radio)" : "")); }
     saveSettings();
     return tuned;
 }
@@ -1068,6 +1072,7 @@ static void serve(SOCKET c) {
     std::string req(buf), path = req.substr(req.find(' ') + 1); path = path.substr(0, path.find(' '));
     std::string body, type = "application/json";
     if (path.rfind("/state", 0) == 0) body = stateJson();
+    else if (path.rfind("/devices", 0) == 0) body = devicesJson();
     else if (path.rfind("/set?", 0) == 0) { bool tuned = apply(path.substr(5)); body = stateJson(); if (tuned) localBeep({1750, 1750}); }  // a refused click makes no sound
     else { body.assign((const char*)PANEL, sizeof PANEL); type = "text/html; charset=utf-8"; }
     std::string head = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n";

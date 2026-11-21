@@ -23,7 +23,7 @@ body{margin:0;background:radial-gradient(1100px 600px at 50% -15%,#26231e,var(--
 .status{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
 .status b{color:var(--ink);font-weight:600}
 .main{display:grid;grid-template-columns:minmax(0,250px) minmax(0,1fr) minmax(0,200px);gap:18px;align-items:center}
-@media (max-width:860px){.main{grid-template-columns:1fr}}
+@media (max-width:860px){.main{grid-template-columns:1fr}.lcd{height:auto}}
 /* meter */
 .meter{background:linear-gradient(180deg,#f6e7b8,#e9d391);border-radius:8px;border:3px solid #050505;box-shadow:inset 0 0 18px #c89a3a,0 0 22px #ffcf6a33;aspect-ratio:1.55;max-width:100%}
 .meter svg{display:block;width:100%;height:100%}
@@ -170,12 +170,31 @@ body.simple .ht .keys2{grid-template-columns:repeat(3,minmax(0,1fr))}
 .dark .kled,.dark .tog .led{background:#2a0a07!important;box-shadow:none!important}
 .dark .lcd{filter:brightness(.12)}.dark .meter{filter:brightness(.35) saturate(.4)}
 .ht .knob .kled{display:none}
+.dark .lcd>*{visibility:hidden}
+.dark .fin input{color:transparent}.dark .tog[aria-pressed=true]{color:#b9bbc0}
+.ht .lcd2.dark>*{visibility:hidden}
+/* fixed sizes: what the displays show never moves them */
+.lcd{height:184px;overflow:hidden}
+.segrow{flex-wrap:nowrap}
+.chseg{height:92px;width:120px}.fqseg{height:34px;width:132px}
+.seg svg{width:100%;height:100%}
+.who{height:18px}
+.flags{flex-wrap:nowrap;height:18px;overflow:hidden}
+.ht .lcd2{height:150px;overflow:hidden}
+.ht .r1,.ht .r3{height:22px;white-space:nowrap;overflow:hidden}
+.ht .big{height:62px;white-space:nowrap;overflow:hidden}
+.ht .name{height:22px}
+/* buttons and switches: green while on, a green flash when clicked */
+.tog[aria-pressed=true]{color:#7dff8a}
+button.flash{animation:flash .35s ease-out}
+@keyframes flash{0%{color:#7dff8a;border-color:#7dff8a;box-shadow:0 0 12px #7dff8a66}100%{}}
+.seg2 button[aria-pressed=true]{color:#7dff8a}
 </style></head><body><div class="wrap">
 
 <div class="bar">
-  <div><span class="lab">Radio</span><span class="seg2" role="group" aria-label="Radio"><button id="vCb" aria-pressed="true">Vehicle CB</button><button id="vHt" aria-pressed="false">Handheld</button></span></div>
-  <div><span class="lab">Panel</span><span class="seg2" role="group" aria-label="Panel"><button id="mSimple">Simple</button><button id="mFull">Detailed</button></span></div>
-  <div id="txBox"><span class="lab">Transmit on</span><span class="seg2" role="group" aria-label="Transmit on"><button id="tx0">CB</button><button id="tx1">Handheld</button><button id="tx2">Both</button></span></div>
+  <div><span class="lab">Radio</span><span class="seg2" role="group" aria-label="Radio"><button id="vCb" aria-pressed="true" title="The CB in your vehicle">CB Radio</button><button id="vHt" aria-pressed="false" title="The ham radio you carry">Ham Radio</button></span></div>
+  <div><span class="lab">Panel</span><span class="seg2" role="group" aria-label="Panel"><button id="mSimple" title="Only the main controls">Simple</button><button id="mFull" title="Every control">Detailed</button></span></div>
+  <div id="txBox"><span class="lab">Transmit on</span><span class="seg2" role="group" aria-label="Transmit on"><button id="tx0" title="Talk on the vehicle CB">CB</button><button id="tx1" title="Talk on the ham radio">Ham</button><button id="tx2" title="Talk on both at once">Both</button></span></div>
 </div>
 <div id="cbView">
 <div class="radio" id="cbRadio"><div class="off" id="cbOff" hidden></div><div class="face">
@@ -199,28 +218,28 @@ body.simple .ht .keys2{grid-template-columns:repeat(3,minmax(0,1fr))}
       <div class="flags"><span id="fRx">RX</span><span id="fTx">TX</span><span id="fRb">RB</span><span id="fSq">SQ</span><span id="fPr">CHK</span><span id="fVeh">VEH</span><span id="fHh">HH</span><span id="fGv" class="g">GV</span></div>
       <div class="who" id="who">&nbsp;</div>
     </div>
-    <div class="knobs"><div class="knob big" id="kCh" tabindex="0" role="slider" aria-label="Channel" aria-valuemin="1" aria-valuemax="40"></div></div>
+    <div class="knobs"><div class="knob big" id="kCh" title="Channel: drag up or down, scroll, or use the arrow keys" tabindex="0" role="slider" aria-label="Channel" aria-valuemin="1" aria-valuemax="40"></div></div>
   </div>
 
   <div class="tune">
-    <div class="pair adv"><button id="fUp" aria-label="Up 5 kHz">+5 kHz</button><button id="fDn" aria-label="Down 5 kHz">&minus;5 kHz</button></div>
+    <div class="pair adv"><button id="fUp" title="Up 5 kHz" aria-label="Up 5 kHz">+5 kHz</button><button id="fDn" title="Down 5 kHz" aria-label="Down 5 kHz">&minus;5 kHz</button></div>
     <div class="dial adv"><div class="scale" id="scale"><span class="ptr" id="ptr"></span></div>
-      <input type="range" id="band" min="25615" max="28305" step="5" aria-label="Frequency"></div>
-    <div class="pair"><button id="chUp" aria-label="Next channel">CH &#9650;</button><button id="chDn" aria-label="Previous channel">CH &#9660;</button></div>
+      <input type="range" id="band" title="Tune the whole band" min="25615" max="28305" step="5" aria-label="Frequency"></div>
+    <div class="pair"><button id="chUp" title="Next channel" aria-label="Next channel">CH &#9650;</button><button id="chDn" title="Previous channel" aria-label="Previous channel">CH &#9660;</button></div>
   </div>
   <div class="lower">
-    <div class="fin adv"><input id="fType" inputmode="decimal" aria-label="Type a frequency in MHz" autocomplete="off"><span>MHz &crarr;</span></div>
+    <div class="fin adv"><input id="fType" title="Type a frequency in MHz and press Enter" inputmode="decimal" aria-label="Type a frequency in MHz" autocomplete="off"><span>MHz &crarr;</span></div>
     <div class="knobs">
-      <div class="knob" id="kVol" tabindex="0" role="slider" aria-label="Volume"></div>
-      <div class="knob adv" id="kSq" tabindex="0" role="slider" aria-label="Squelch"></div>
-      <div class="knob adv" id="kMic" tabindex="0" role="slider" aria-label="Mic gain"></div>
-      <div class="knob adv" id="kPr" tabindex="0" role="slider" aria-label="Radio check signal"></div>
+      <div class="knob" id="kVol" title="Volume" tabindex="0" role="slider" aria-label="Volume"></div>
+      <div class="knob adv" id="kSq" title="Squelch: how strong a signal must be to open the speaker" tabindex="0" role="slider" aria-label="Squelch"></div>
+      <div class="knob adv" id="kMic" title="Mic gain: how loud you go out" tabindex="0" role="slider" aria-label="Mic gain"></div>
+      <div class="knob adv" id="kPr" title="Radio check level: how far away your check sounds" tabindex="0" role="slider" aria-label="Radio check signal"></div>
     </div>
     <div class="toggles">
-      <button class="tog adv" id="tRb" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>ROGER</button>
-      <button class="tog adv" id="tPr" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>CHECK</button>
-      <button class="tog adv" id="tGv" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>GAME V</button>
-      <button class="tog" id="tPw" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>POWER</button>
+      <button class="tog adv" id="tRb" title="Roger beep: a short beep when you let go of the talk key" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>ROGER</button>
+      <button class="tog adv" id="tPr" title="Radio check: hear your own over back, as from a station that far away" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>CHECK</button>
+      <button class="tog adv" id="tGv" title="Game voice: talking also keys the game's own voice chat (G)" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>GAME V</button>
+      <button class="tog" id="tPw" title="Power: switch the CB on or off" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>POWER</button>
     </div>
   </div>
 </div></div>
@@ -228,10 +247,10 @@ body.simple .ht .keys2{grid-template-columns:repeat(3,minmax(0,1fr))}
 <div id="htView" hidden><div class="htwrap"><div class="ht">
   <span class="ant" aria-hidden="true"></span>
   <div class="body"><span class="ptt" id="htPtt" aria-hidden="true"></span>
-    <div class="slide" id="htPower" role="switch" tabindex="0" aria-checked="true" aria-label="Handheld power"><span class="track"></span><span class="thumb"></span></div>
+    <div class="slide" id="htPower" title="Power: slide up for on" role="switch" tabindex="0" aria-checked="true" aria-label="Handheld power"><span class="track"></span><span class="thumb"></span></div>
     <span class="plbl pon" id="htOnL">ON</span><span class="plbl poff" id="htOffL">OFF</span>
     <div class="brand2">MOTORTOWN <b>HT-3</b></div>
-    <div class="top"><div class="knob" id="kHtCh" tabindex="0" role="slider" aria-label="Handheld channel"></div><span class="led2" id="htLed"></span><div class="knob" id="kHtVol" tabindex="0" role="slider" aria-label="Volume"></div></div>
+    <div class="top"><div class="knob" id="kHtCh" title="Channel" tabindex="0" role="slider" aria-label="Handheld channel"></div><span class="led2" id="htLed"></span><div class="knob" id="kHtVol" title="Volume" tabindex="0" role="slider" aria-label="Volume"></div></div>
     <div class="grill" aria-hidden="true"></div>
     <div class="lcd2" id="htLcd">
       <div class="r1"><span id="htTx">&nbsp;</span><span class="bars" id="htBars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i style="height:13px"></i><i style="height:16px"></i></span><span id="htBat">&#9646;&#9646;&#9646;</span></div>
@@ -270,6 +289,8 @@ const mhz=k=>(k/1000).toFixed(3);
 /* seven segments: a b c d e f g */
 const SEG={"0":"abcdef","1":"bc","2":"abged","3":"abgcd","4":"fgbc","5":"afgcd","6":"afgedc","7":"abc","8":"abcdefg","9":"abcfgd","-":"g"," ":""};
 const P={a:"3,1 17,1 15,3 5,3",b:"18,2 18,16 16,14 16,4",c:"18,18 18,32 16,30 16,20",d:"3,33 17,33 15,31 5,31",e:"2,18 2,32 4,30 4,20",f:"2,2 2,16 4,14 4,4",g:"3,17 5,15.5 15,15.5 17,17 15,18.5 5,18.5"};
+const segCache={};
+function setSeg(id,text){if(segCache[id]===text)return;segCache[id]=text;$(id).innerHTML=seg(text)}
 function seg(text){let x=0,out="";for(const ch of text){if(ch=="."){out+=`<rect x="${x-1}" y="30" width="3.4" height="3.4" fill="var(--seg)" filter="url(#glow)"/>`;x+=6;continue}
  const on=SEG[ch]||"";for(const k in P)out+=`<polygon transform="translate(${x} 0) skewX(-6)" points="${P[k]}" fill="${on.includes(k)?"var(--seg)":"var(--segdim)"}" ${on.includes(k)?'filter="url(#glow)"':""}/>`;x+=22}
  return `<svg viewBox="-2 -1 ${x+2} 36" aria-hidden="true"><defs><filter id="glow"><feGaussianBlur stdDeviation=".6"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>${out}</svg>`}
@@ -316,7 +337,7 @@ const kPr=knob($("kPr"),"Check at",1,100,1,x=>"S-"+sUnits(x/100),debounce(x=>set
 
 /* channel buttons */
 for(const [g,list] of GROUPS){const h=document.createElement("h3");h.textContent=g;$("chans").append(h);
- for(const c of list){const b=document.createElement("button");b.className="chb";b.dataset.ch=c;b.innerHTML=`<span class="n">${String(c).padStart(2,"0")}</span><span class="d">${esc(NAMES[c])}</span>`;b.onclick=()=>setR("ch="+c);$("chans").append(b)}}
+ for(const c of list){const b=document.createElement("button");b.className="chb";b.dataset.ch=c;b.title="Channel "+c+" - "+NAMES[c]+" ("+mhz(CH[c])+" MHz)";b.innerHTML=`<span class="n">${String(c).padStart(2,"0")}</span><span class="d">${esc(NAMES[c])}</span>`;b.onclick=()=>setR("ch="+c);$("chans").append(b)}}
 const chName=c=>NAMES[c]||"";
 
 function draw(){if(!st)return;
@@ -340,8 +361,8 @@ function draw(){if(!st)return;
  if(view=="ht")drawHt(s,Rg);
  if(tuneTo!==null&&(s.khz===tuneTo||Date.now()-tuneAt>2000))tuneTo=null;
  const k=tuneTo!==null?tuneTo:s.khz,c=CH.indexOf(k);
- $("chSeg").innerHTML=seg(c>0?String(c).padStart(2," "):"--");
- $("fqSeg").innerHTML=seg(mhz(k));
+ setSeg("chSeg",c>0?String(c).padStart(2," "):"--");
+ setSeg("fqSeg",mhz(k));
  const rx=(s.rx||[]).length?Math.max(...s.rx):0;
  needle(s.tx?s.txLevel:rx*0.6+(rx>0.85?(rx-0.85)/0.15*0.4:0));$("mLab").textContent=s.tx?"RF POWER":"SIGNAL";
  const fl={fRx:rx>0&&!s.tx,fTx:!!s.tx,fRb:!!s.roger,fSq:s.sq>0,fPr:!!s.parrot,fVeh:!!s.veh,fHh:!!(st.ht.avail&&st.ht.on),fGv:!!s.gamevoice};
@@ -354,17 +375,35 @@ function draw(){if(!st)return;
  if(document.activeElement!==$("fType"))$("fType").value=mhz(k);
  document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.ch===s.ch));
  $("stat").innerHTML=Rg.avail?`range <b>${Rg.range||0} km</b>`:"";
- const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No handheld yet: buy a CB Handheld Radio at the tech store and take it out once (its hotbar number). It stays with you, in vehicles too.":"";
+ const w=!s.steam?"Steam networking is not up: only the radio check works.":view=="ht"&&!st.ht.avail?"No ham radio yet: buy one at the tech store and take it out once (its hotbar number). It stays with you from then on, in vehicles too.":"";
  $("warn").hidden=!w;$("warn").textContent=w;
- devs("micDev",s.mics||[],s.micDev||"");devs("spkDev",s.spks||[],s.spkDev||"")}
+}
+let devTimer=0;
+function loadDevs(){fetch("/devices").then(r=>r.json()).then(d=>{devs("micDev",d.mics||[],d.micDev||"");devs("spkDev",d.spks||[],d.spkDev||"")}).catch(()=>{})}
+document.querySelector("details").addEventListener("toggle",e=>{clearInterval(devTimer);if(e.target.open){loadDevs();devTimer=setInterval(loadDevs,5000)}});
 function poll(){if(busy)return;busy=true;fetch("/state").then(r=>r.json()).then(s=>{st=s;draw()}).catch(()=>{$("stat").textContent="game not running"}).finally(()=>busy=false)}
-setInterval(poll,120);poll();
+if(location.search.includes("selftest"))setTimeout(()=>{
+ const box=()=>["#chSeg","#fqSeg",".lcd",".ht .lcd2",".ht .big",".who"].map(q=>{const e=document.querySelector(q);const r=e.getBoundingClientRect();return q+":"+Math.round(r.width)+"x"+Math.round(r.height)});
+ const base={vol:80,sq:8,mic:100,roger:1,holding:0,carried:1,txMode:0,mode:0,parrot:0,parrotS:60,tx:0,txOn:0,txLevel:0,inVeh:1,veh:1,gamevoice:1,steam:1,rx:[],keys:["Home","End","Ctrl+End","Ctrl+Home"],range:20,
+  cb:{avail:1,on:1,khz:27185,ch:19,range:20,hear:1},ht:{avail:1,on:1,khz:27185,ch:19,range:3,hear:1}};
+ const cases=[{},{cb:{avail:1,on:1,khz:25615,ch:0,range:20,hear:1}},{cb:{avail:1,on:1,khz:28305,ch:0,range:60,hear:1}},{cb:{avail:1,on:1,khz:26965,ch:1,range:10,hear:1}},
+  {cb:{avail:1,on:0,khz:27405,ch:40,range:25,hear:1}},{tx:1,txOn:1,txLevel:1},{rx:[1,.5]},{ht:{avail:1,on:1,khz:27355,ch:0,range:3,hear:1}},{ht:{avail:1,on:0,khz:27065,ch:9,range:3,hear:1}},{ht:{avail:0,on:1,khz:27065,ch:9,range:3,hear:1}}];
+ const out=[];let first=null;
+ for(const v of ["cb","ht"])for(const c of cases){st=Object.assign(JSON.parse(JSON.stringify(base)),c);view=v;lastLoc="veh";draw();document.getElementById("htView").hidden=false;document.getElementById("cbView").hidden=false;
+  const b=box().join(" ");if(first===null)first=b;if(b!==first)out.push(v+" "+JSON.stringify(c)+" -> "+b)}
+ document.body.setAttribute("data-selftest",out.length?"MOVED: "+first+" || "+out.join(" | "):"OK "+first);
+},0);else{setInterval(poll,120);poll()}
 
 const stepCh=d=>{const k=st[view].khz,cur=CH.indexOf(k);let best=0;
  if(cur>0)best=(cur-1+d+40)%40+1;  // by number: 23 sits out of order on the band
  else{for(let c=1;c<=40;c++){const x=CH[c];if(d>0?(x>k&&(!best||x<CH[best])):(x<k&&(!best||x>CH[best])))best=c}best=best||(d>0?1:40)}
  setR("ch="+best)};
 $("chUp").onclick=()=>stepCh(1);$("chDn").onclick=()=>stepCh(-1);
+let actx=null;
+function click(){try{actx=actx||new AudioContext();const o=actx.createOscillator(),g=actx.createGain();o.frequency.value=1800;g.gain.setValueAtTime(0.03,actx.currentTime);
+ g.gain.exponentialRampToValueAtTime(0.0001,actx.currentTime+0.04);o.connect(g).connect(actx.destination);o.start();o.stop(actx.currentTime+0.05)}catch(e){}}
+document.addEventListener("pointerdown",e=>{const b=e.target.closest("button,.slide");if(!b||getComputedStyle(b).pointerEvents=="none")return;
+ click();b.classList.remove("flash");void b.offsetWidth;b.classList.add("flash")});
 $("mSimple").onclick=()=>set("mode=1");$("mFull").onclick=()=>set("mode=0");
 $("htPower").onclick=()=>set("rig=ht&power="+(st.ht.on?0:1));
 $("htPower").onkeydown=e=>{if(e.key==" "||e.key=="Enter"){e.preventDefault();$("htPower").click()}};
@@ -377,7 +416,8 @@ const kHtCh=knob($("kHtCh"),"Ch",1,40,1,x=>"CH "+x,debounce(x=>set("rig=ht&ch="+
 let entry="";
 const KEYS=[["&#9650;","up","o"],["&#9660;","dn","o"],["&minus;5k","m5","o"],["+5k","p5","o"],["1","1"],["2","2"],["3","3"],["PWR","pw","o"],["4","4"],["5","5"],["6","6"],["SQL+","sq+"],
  ["7","7"],["8","8"],["9","9"],["SQL&minus;","sq-"],["CLR","clr","o"],["0","0"],["ENT","ent","o"],["CHK","chk"]];
-for(const [t,k,c] of KEYS){const b=document.createElement("button");b.innerHTML=t;b.dataset.k=k;if(c)b.className=c;if(/^(\d|clr|ent|sq\+|sq-|chk|m5|p5)$/.test(k))b.classList.add("adv");b.onclick=()=>htKey(k);$("htKeys").append(b)}
+const KTIP={up:"Next channel",dn:"Previous channel",m5:"Down 5 kHz",p5:"Up 5 kHz",pw:"Power",clr:"Clear the entry",ent:"Tune to the entry (a channel, or 5 digits of kHz)","sq+":"Squelch up","sq-":"Squelch down",chk:"Radio check"};
+for(const [t,k,c] of KEYS){const b=document.createElement("button");b.innerHTML=t;b.dataset.k=k;b.title=KTIP[k]||("Key "+k);if(c)b.className=c;if(/^(\d|clr|ent|sq\+|sq-|chk|m5|p5)$/.test(k))b.classList.add("adv");b.onclick=()=>htKey(k);$("htKeys").append(b)}
 function htKey(k){if(/^\d$/.test(k)){if(entry.length<5)entry+=k;draw();return}
  if(k=="clr"){entry="";draw();return}
  if(k=="ent"){if(entry.length==5)set("rig=ht&khz="+entry);else if(entry.length&&entry.length<=2)set("rig=ht&ch="+(+entry));entry="";return}
@@ -396,7 +436,7 @@ function drawHt(s,R){const on=R.on&&R.avail,rx=(s.rx||[]).length?Math.max(...s.r
  if(entry){$("htBig").innerHTML=entry.length<=2?`<small>CH</small>${entry}_`:`<small></small>${(entry+"_____").slice(0,2)}.${(entry+"_____").slice(2,5)}`;$("htFq").textContent="ENTER";$("htName").textContent="ENT to tune, CLR to cancel"}
  else{$("htBig").innerHTML=R.ch?`<small>CH</small>${String(R.ch).padStart(2,"0")}`:`<small></small>${mhz(R.khz)}`;$("htFq").textContent=R.ch?mhz(R.khz):"OFF CHANNEL";$("htName").textContent=R.ch?chName(R.ch):""}
  $("htRange").textContent=(R.range||3)+" KM";
- if(!R.avail){$("htBig").innerHTML="<small></small>----";$("htFq").textContent="";$("htName").textContent="Take the handheld out once";$("htRange").textContent=""}}
+ if(!R.avail){$("htBig").innerHTML="<small></small>----";$("htFq").textContent="";$("htName").textContent="Take the ham radio out once";$("htRange").textContent=""}}
 $("fUp").onclick=()=>setR("step=1");$("fDn").onclick=()=>setR("step=-1");
 $("band").oninput=e=>{tuneTo=+e.target.value;tuneAt=Date.now()+1e9;$("scale").classList.add("drag");draw()};  // held while the drag lasts
 $("band").onchange=e=>{tuneTo=+e.target.value;tuneAt=Date.now();$("scale").classList.remove("drag");setR("khz="+e.target.value)};
