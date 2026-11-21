@@ -959,7 +959,7 @@ static void keyThread() {
     Band band;
     float env = 0.05f;
     uint16_t seq = 0;
-    bool was = false, nextDown = false, panelDown = false, keyDown = false;
+    bool was = false, nextDown = false, panelDown = false;
     int sentOn = 0;  // the rigs the current over went out on: its end goes to the same
     while (!api->stopping()) {
         bool f = gameFocused() && !chatOpen, ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -981,10 +981,10 @@ static void keyThread() {
         }
         if (!key) toldBar = false;
         bool want = key && (txs || parrot);
-        // the game's own voice goes with the key, not with the radio: the people around hear you even when no radio
-        // can send (switched off, a service channel you have no role for, no rig) -- 11-21
+        // the game's own voice goes with an over that goes out: with the radio off, Home does nothing at all (11-22)
         static bool gvHeld;
-        if (key != gvHeld) { gvHeld = key; speak(key); }
+        bool gv = key && txs;
+        if (gv != gvHeld) { gvHeld = gv; speak(gv); }
         bool up = f && held(kUp), dn = f && held(kDown), nx = up || dn, pn = f && held(kPanel);
         if (nx && !nextDown) {
             bool down = dn;
@@ -992,7 +992,7 @@ static void keyThread() {
             { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
               int r = activeRig(), khz = rig[r].khz;
               if (r == CB && !inVehicle) { notice("CB: get in the vehicle to tune its CB"); nextDown = true; continue; }
-              if (!rig[r].on) { notice(r == CB ? "CB: switched off" : "Ham radio: switched off"); nextDown = true; continue; }
+              if (!rig[r].on) { nextDown = true; continue; }  // off: nothing to tune, and no notice (11-22)
               int best = chOf(khz);
               if (best) best = down ? (best + 38) % 40 + 1 : best % 40 + 1;
               else {
@@ -1014,8 +1014,6 @@ static void keyThread() {
         if (!esc && escClose) { escClose = false; if (overlayOn && api->game_thread_ready()) api->run_on_game_thread(overlayOff, nullptr); }
         escDown = esc;
         nextDown = nx; panelDown = pn;
-        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "Ham radio: switched off" : "CB: the rig is in your vehicle. On foot, take out a ham radio (tech store)"); }
-        keyDown = key;
         if (want && !was) {  // key up
             WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
             if (waveInOpen(&wi, [] { std::lock_guard<std::mutex> g(mu); return deviceId(true, micDev); }(), &wf, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR) {
