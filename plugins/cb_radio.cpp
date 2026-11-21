@@ -429,6 +429,7 @@ static bool resolveWorld() {
 static void scanWorld() {
     static std::vector<uintptr_t> states, vehicles;
     static uintptr_t pc, chat;
+    static int pcIdx = -1;
     static DWORD lastFull;
     if (GetTickCount() - lastFull > 3000) {  // the full object walk, every 3 s; positions every pass
         lastFull = GetTickCount();
@@ -439,7 +440,7 @@ static void scanWorld() {
             uintptr_t c = classOf(o);
             if (c == cPS || (cPS && api->is_a(c, cPS))) states.push_back(o);
             else if (cVeh && api->is_a(c, cVeh)) vehicles.push_back(o);
-            else if (!pc && (c == cPC || api->is_a(c, cPC))) pc = o;
+            else if (!pc && (c == cPC || api->is_a(c, cPC))) { pc = o; pcIdx = i; }
             else if (!chat && cChat && api->is_a(c, cChat) && oChatText >= 0 && get<uintptr_t>(o + oChatText)) chat = o;  // the menu's has no text box
         }
         std::vector<Player> found;
@@ -456,6 +457,7 @@ static void scanWorld() {
         std::lock_guard<std::mutex> g(mu);
         players.swap(found);
     }
+    if (pc && (pcIdx < 0 || api->object(pcIdx) != pc)) { pc = 0; chat = 0; lastFull = 0; }  // gone: the world went
     gPC = pc;
     gChat = chat;
     if (!pc || classOf(pc) == 0) return;
@@ -576,7 +578,30 @@ struct Steam {
 // lands in unloaded Steam code, and the crash handler Steam left behind took the game down on every close (11-21,
 // Windows: crashhandler64.dll_unloaded). Every call asks the pipe first; once it is gone the radio is off for good.
 static volatile bool steamGone = false;
-static bool steamOk() { if (steamGone || api->stopping() || !steam.pipe || !steam.pipe()) { steamGone = true; return false; } return true; }
+// The close crash, 11-21 (Windows: crashhandler64.dll_unloaded on every close): the net thread polls Steam every few ms,
+// and while the game shuts Steam down its networking is freed before the pipe reads as gone -- one call in that gap
+// faults, and the crash handler Steam unloaded turns any fault into a crash. The game takes its world down and closes
+// its window BEFORE it shuts Steam down, so Steam is only called while both are there (netLive, set by the world scan).
+static std::atomic<bool> netLive{false};
+static bool steamOk() {
+    if (steamGone || api->stopping() || !steam.pipe) return false;
+    if (!netLive) return false;  // between worlds, or closing: not now (nothing is lost, the hellos find everyone again)
+    if (!steam.pipe()) { steamGone = true; return false; }
+    return true;
+}
+static HWND gameWindow() {  // the game's main window, found once; IsWindow tells when it closes
+    static HWND h;
+    if (h && IsWindow(h)) return h;
+    struct F { static BOOL CALLBACK cb(HWND w, LPARAM out) {
+        DWORD pid = 0; GetWindowThreadProcessId(w, &pid);
+        wchar_t cls[64] = L""; GetClassNameW(w, cls, 64);
+        if (pid == GetCurrentProcessId() && !wcscmp(cls, L"UnrealWindow") && IsWindowVisible(w)) { *(HWND*)out = w; return FALSE; }
+        return TRUE; } };
+    HWND found = nullptr;
+    EnumWindows(F::cb, (LPARAM)&found);
+    if (found) h = found;
+    return found;
+}
 static bool steamUp() {
     HMODULE m = GetModuleHandleW(L"steam_api64.dll");
     auto pipe = m ? (int (*)())GetProcAddress(m, "SteamAPI_GetHSteamPipe") : nullptr;
@@ -858,7 +883,8 @@ static void received(uint64_t from, const Packet& p, int n) {
 static void netThread() {
     DWORD lastHello = 0;
     uint16_t seq = 0;
-    while (steamOk()) {
+    while (!steamGone && !api->stopping()) {
+        if (!steamOk()) { Sleep(20); continue; }  // no world / closing: no Steam calls at all
         uintptr_t msgs[64];
         int n = steam.recv(steam.nm, STEAM_CHANNEL, msgs, 64);
         for (int i = 0; i < n; i++) {
@@ -1254,17 +1280,27 @@ static DWORD WINAPI run(LPVOID) {
     if (steam.nm) std::thread(netThread).detach();
     DWORD shopAt = 0;
     while (!api->stopping()) {
-        // The game shuts Steam down early on its way out, and Steam's unloaded crash handler stays registered: any
-        // fault after that -- even one our guarded reads would catch -- takes the game down (crashhandler64.dll_unloaded
-        // on every close, 11-21). So once Steam is gone, nothing of ours touches game memory again.
-        if (steam.pipe && (steamGone || !steam.pipe())) { steamGone = true; MT_LOG("Steam is gone: the game is closing, the radio stops"); break; }
+        // Closing: the game drops its world and its window before it shuts Steam down, and Steam's unloaded crash
+        // handler makes any fault after that a crash (crashhandler64.dll_unloaded on every close, 11-21). So Steam is
+        // only called while a world and the window are up, and once the window closes nothing of ours runs.
+        static int tick;
+        bool slow = tick++ % 5 == 0;  // the world scan every 50 ms (it is what sees the world go); the rest every 250 ms
         if (world) scanWorld();
+        static bool sawWindow;
+        HWND win = gameWindow();
+        sawWindow |= win != nullptr;
+        bool live = gPC != 0 && win != nullptr;
+        if (live != netLive) { netLive = live; MT_LOG(live ? "on the air: a world is up" : "off the air: no world or the window closed (no Steam calls)"); }
+        if (sawWindow && !win) {  // the window closed: the game is on its way out -- nothing of ours runs any more
+            steamGone = true; MT_LOG("the game window closed: the radio stops before Steam does");
+            break;
+        }
         if (!shopAt && gPC) shopAt = GetTickCount() + 20000;
         if (shopAt && shopAt != 1 && (int)(GetTickCount() - shopAt) >= 0 && api->game_thread_ready()) { shopAt = 1; api->run_on_game_thread(shopCheck, nullptr); }
         bool any; { std::lock_guard<std::mutex> g(mu); any = !notices.empty(); }
-        if (any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
-        if (gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
-        Sleep(250);
+        if (slow && any && gPC && api->game_thread_ready()) api->run_on_game_thread(showNotices, nullptr);
+        if (slow && gChat && api->game_thread_ready()) api->run_on_game_thread(checkChat, nullptr);
+        Sleep(50);
     }
     return 0;
 }
