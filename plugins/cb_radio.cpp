@@ -993,9 +993,12 @@ static void keyThread() {
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
-        static bool escDown;
-        bool esc = f && (GetAsyncKeyState(VK_ESCAPE) & 0x8000);
-        if (esc && !escDown && overlayOn && api->game_thread_ready()) api->run_on_game_thread(overlayOff, nullptr);
+        // Esc closes the in-game panel on its RELEASE: closing on the press gave the keys back to the game while Esc was
+        // still down, and the game opened its own menu too (11-21)
+        static bool escDown, escClose;
+        bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        if (esc && !escDown && overlayOn) escClose = true;
+        if (!esc && escClose) { escClose = false; if (overlayOn && api->game_thread_ready()) api->run_on_game_thread(overlayOff, nullptr); }
         escDown = esc;
         nextDown = nx; panelDown = pn;
         if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice(carried ? "Ham radio: switched off" : "CB: the rig is in your vehicle. On foot, take out a ham radio (tech store)"); }
@@ -1331,6 +1334,7 @@ static void inputMode(bool ui) {
         // UI only while it is up, like the game's own menus: the game gets no keys, so Esc closes this window and
         // does not open the game's menu as well (11-21)
         uintptr_t f = findFn("SetInputMode_UIOnlyEx", "WidgetBlueprintLibrary");
+        static bool told; if (!told) { told = true; MT_LOG("overlay: input mode %s", f ? "UI only" : "game and UI (UI only not found)"); }
         if (f) {
             unsigned char a[48] = {}; int o = off(f, "PlayerController"), ow = off(f, "InWidgetToFocus"), fl = off(f, "bFlushInput");
             if (o >= 0) memcpy(a + o, &pc, 8);
