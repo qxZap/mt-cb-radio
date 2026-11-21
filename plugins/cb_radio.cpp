@@ -1,6 +1,12 @@
 // CB Radio -- plugins\mt_plugin_CBRadio.dll. Every vehicle has a CB rig (the user, 2026-11-21: "all vehicles shall have
 // CB radio" until a CB part exists). Hold Home to talk; End / Ctrl+End channel up / down; Ctrl+Home opens the rig's
-// panel (http://127.0.0.1:8095/): channel, privacy code, volume, squelch, mic gain, roger beep, presets, who is on air.
+// panel (http://127.0.0.1:8095/): frequency, volume, squelch, mic gain, roger beep, the public channels, who is on air.
+//
+// Tuning is by frequency, like a real rig (the user, 2026-11-21: public channels only, no privacy codes, tune your own
+// frequency): 25.615-28.305 MHz in 5 kHz steps, the 40 channels being where the band plan puts them. A station 5 kHz
+// off comes through weak and garbled (AM splatter), further off nothing. On foot the radio is the CB Handheld item
+// (qxZap_CBRadio_P, sold at the tech store), and it works while it is in your hand (MTCharacter.Net_HoldingItem):
+// the player's own inventory is not readable, the held item is.
 //
 // Transport: Steam's ISteamNetworkingMessages, peer to peer by Steam id, on a channel of its own (the game's net driver
 // uses Steam *sockets*, not messages, so nothing of the game's is touched). Every few seconds a hello goes to every
@@ -47,25 +53,34 @@ static const char* FREQ[41] = {"", "26.965", "26.975", "26.985", "27.005", "27.0
 
 // ---- settings ----
 static std::mutex mu;  // everything below that two threads touch
-static int channel = 19, code = 0, volume = 80, squelchPct = 8, micGain = 100, roger = 1, handheld = 0, parrot = 0, parrotS = 60;
+static const int KHZ_MIN = 25615, KHZ_MAX = 28305;  // export-radio coverage; 5 kHz steps
+static int khz = 27185, volume = 80, squelchPct = 8, micGain = 100, roger = 1, parrot = 0, parrotS = 60;
+static bool holding;  // on foot with the CB Handheld in the hand (under mu)
+static int chKhz(int ch) { return ch >= 1 && ch <= 40 ? (int)lround(atof(FREQ[ch]) * 1000) : 0; }
+static int chOf(int k) { for (int c = 1; c <= 40; c++) if (chKhz(c) == k) return c; return 0; }
+static int snapKhz(int k) { k = (k + 2) / 5 * 5; return k < KHZ_MIN ? KHZ_MIN : k > KHZ_MAX ? KHZ_MAX : k; }
 static double rangeKm = 10;
 static int kTalk = VK_HOME, kNext = VK_END, kPanel = VK_HOME, kVoice = 'G';  // Ctrl+End = channel down, Ctrl+Home = panel
-static std::wstring presets, micDev, spkDev;  // devices by name ("" = the system's default)
+static std::wstring micDev, spkDev;  // devices by name ("" = the system's default)
 static std::atomic<bool> reopenOut{false};
-static int footCh = 19, footCode = 0, gameVoice = 1;  // the handheld's own channel/code; key the game's voice too
+static int footKhz = 27185, gameVoice = 1;  // the handheld's own frequency; key the game's voice too
 static int64_t myVeh;                                // Net_VehicleId of the vehicle we sit in, 0 on foot (under mu)
-struct VehRadio { int ch, code; uint32_t ver; };
-static std::map<int64_t, VehRadio> vehRadio;          // under mu; [Vehicles] id=ch,code,ver
+struct VehRadio { int khz; uint32_t ver; };
+static std::map<int64_t, VehRadio> vehRadio;          // under mu; [Vehicles] id=khz,ver
 static std::map<uint64_t, int64_t> peerVeh;           // under mu: the vehicle each plugin player sits in
 static std::atomic<bool> helloNow{false};
 static void saveVeh(int64_t id, const VehRadio& r) {
-    wchar_t k[24], v[32]; swprintf(k, 24, L"%lld", (long long)id); swprintf(v, 32, L"%d,%d,%u", r.ch, r.code, r.ver);
+    wchar_t k[24], v[32]; swprintf(k, 24, L"%lld", (long long)id); swprintf(v, 32, L"%d,%u", r.khz, r.ver);
     iniSet(L"cb_radio.ini", L"Vehicles", k, v, true);
 }
 static bool loadVeh(int64_t id, VehRadio& r) {
     wchar_t k[24]; swprintf(k, 24, L"%lld", (long long)id);
     std::wstring v = iniGet(L"cb_radio.ini", L"Vehicles", k);
-    return swscanf(v.c_str(), L"%d,%d,%u", &r.ch, &r.code, &r.ver) == 3 && r.ch >= 1 && r.ch <= 40 && r.code >= 0 && r.code < 100;
+    int a = 0, b = 0; unsigned c = 0;
+    int n = swscanf(v.c_str(), L"%d,%d,%u", &a, &b, &c);
+    if (n == 3) { r.khz = chKhz(a); r.ver = c; return r.khz != 0; }  // before frequencies: ch,code,ver
+    if (n == 2 && a >= KHZ_MIN && a <= KHZ_MAX) { r.khz = snapKhz(a); r.ver = (uint32_t)b; return true; }
+    return false;
 }
 static std::string utf8(const std::wstring& w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -97,22 +112,18 @@ static UINT deviceId(bool in, const std::wstring& name) {
 }
 static void saveSettings() {
     auto put = [](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); iniSet(INI, L"Radio", k, b, true); };
-    put(L"Channel", footCh); put(L"Code", footCode); put(L"GameVoice", gameVoice); put(L"Volume", volume); put(L"Squelch", squelchPct); put(L"MicGain", micGain);
-    put(L"RogerBeep", roger); put(L"Handheld", handheld);
-    iniSet(INI, L"Radio", L"Presets", presets.c_str(), true);
+    put(L"Frequency", footKhz); put(L"GameVoice", gameVoice); put(L"Volume", volume); put(L"Squelch", squelchPct); put(L"MicGain", micGain);
+    put(L"RogerBeep", roger);
     iniSet(INI, L"Radio", L"MicDevice", micDev.c_str(), true);
     iniSet(INI, L"Radio", L"SpeakerDevice", spkDev.c_str(), true);
 }
 static void loadSettings() {
-    channel = iniInt(INI, L"Radio", L"Channel", 19); if (channel < 1 || channel > 40) channel = 19;
-    code = iniInt(INI, L"Radio", L"Code", 0) % 100;
-    footCh = channel; footCode = code; gameVoice = iniInt(INI, L"Radio", L"GameVoice", 1);
+    int ch = iniInt(INI, L"Radio", L"Channel", 19);  // before frequencies
+    khz = snapKhz(iniInt(INI, L"Radio", L"Frequency", chKhz(ch) ? chKhz(ch) : 27185));
+    footKhz = khz; gameVoice = iniInt(INI, L"Radio", L"GameVoice", 1);
     volume = iniInt(INI, L"Radio", L"Volume", 80); squelchPct = iniInt(INI, L"Radio", L"Squelch", 8);
     micGain = iniInt(INI, L"Radio", L"MicGain", 100); roger = iniInt(INI, L"Radio", L"RogerBeep", 1);
-    handheld = iniInt(INI, L"Radio", L"Handheld", 0);
     rangeKm = iniNum(INI, L"Radio", L"RangeKm", 10); if (rangeKm < 0.5) rangeKm = 0.5;
-    iniSet(INI, L"Radio", L"Presets", L"");
-    presets = iniGet(INI, L"Radio", L"Presets");
     iniSet(INI, L"Radio", L"MicDevice", L""); iniSet(INI, L"Radio", L"SpeakerDevice", L"");
     micDev = iniGet(INI, L"Radio", L"MicDevice"); spkDev = iniGet(INI, L"Radio", L"SpeakerDevice");
     kTalk = iniInt(INI, L"Keys", L"Talk", VK_HOME); kNext = iniInt(INI, L"Keys", L"Channel", VK_END);
@@ -141,7 +152,7 @@ static void loadDebug() {
     if (!ro.empty()) recOut = _wfopen(ro.c_str(), L"ab");
     if (loopKm >= 0 || !talkFile.empty() || recOut) MT_LOG("debug: loopback %.1f km, talk file %d samples, record %s", loopKm, (int)talkFile.size(), recOut ? "on" : "off");
 }
-static uint32_t myKey() { return (uint32_t)(channel * 100 + code); }
+static uint32_t myKey() { return (uint32_t)khz; }
 
 // ---- the world: who is here, where we are (read off the game's objects, no game thread needed) ----
 struct Player { uint64_t sid; std::string name; };
@@ -153,7 +164,8 @@ static bool inVehicle;
 static std::atomic<bool> chatOpen{false};  // typing in the game's chat: Home / End are the text cursor's then
 static uintptr_t cChat, gChat, fHasFocus; static int oChatText = -1;
 static uintptr_t cPS, cPC, cVeh, fSpeak;
-static int oVehId = -1, oSeats = -1, oSeatChar = -1, seatStride = 0;
+static int oVehId = -1, oSeats = -1, oSeatChar = -1, seatStride = 0, oHolding = -1, oHoldKey = -1;
+static uintptr_t cChar;
 static int oUid = -1, oName = -1, oPSLoc = -1, oCtrlPS = -1, oPawn = -1, oRoot = -1, oRelLoc = -1;
 
 static std::string fstr(uintptr_t at) {
@@ -217,7 +229,12 @@ static void showNotices(void*) {
         api->process_event(gPC, fSysMsg, b);
     }
 }
-static std::string presetName(int ch, int cd);
+static std::string presetName(int ch);
+static std::string label(int k) {  // "CB 19  27.185 MHz  -  Truckers", or "27.190 MHz" between channels
+    char b[32]; snprintf(b, sizeof b, "%d.%03d MHz", k / 1000, k % 1000);
+    int c = chOf(k);
+    return c ? "CB " + std::to_string(c) + "  " + b + presetName(c) : std::string("CB  ") + b;
+}
 
 static bool resolveWorld() {
     fSysMsg = api->find_object("Function", "ClientShowSystemMessage", "MotorTownPlayerController");
@@ -230,6 +247,10 @@ static bool resolveWorld() {
     cPC = api->find_object("Class", "MotorTownPlayerController", "/Script/MotorTown");
     cVeh = api->find_object("Class", "MTVehicle", "/Script/MotorTown");
     fSpeak = api->find_object("Function", "ToggleSpeaking", "PlayerController");
+    cChar = api->find_object("Class", "MTCharacter", "/Script/MotorTown");
+    if (cChar) oHolding = off(cChar, "Net_HoldingItem");
+    if (uintptr_t st = api->find_object("ScriptStruct", "MTHoldingItem", "/Script/MotorTown")) oHoldKey = off(st, "ItemKey");
+    if (oHolding < 0 || oHoldKey < 0) MT_LOG("held item not found: no handheld on foot");
     if (cVeh) { oVehId = off(cVeh, "Net_VehicleId"); oSeats = off(cVeh, "Net_Seats"); }
     if (uintptr_t st = api->find_object("ScriptStruct", "MTNetVehicleSeat", "/Script/MotorTown")) {
         oSeatChar = off(st, "Character"); int t = off(st, "SeatType"); if (t >= 0) seatStride = (t + 1 + 7) & ~7;
@@ -304,27 +325,34 @@ static void scanWorld() {
         }
     int64_t id = 0;
     if (in && oVehId >= 0) rd(in + oVehId, &id, 8);
+    // on foot: the CB Handheld in the hand (its name enters the pool once the item table has loaded)
+    static int cbName;
+    if (!cbName) cbName = api->name_index("CB_Handheld");
+    uint32_t held = 0;
+    bool hold = !in && pawn && cbName && oHolding >= 0 && oHoldKey >= 0 && cChar && api->is_a(classOf(pawn), cChar)
+                && rd(pawn + oHolding + oHoldKey, &held, 4) && held == (uint32_t)cbName;
     std::lock_guard<std::mutex> g(mu);
-    myX = p[0]; myY = p[1]; inVehicle = in != 0;
+    if (hold != holding) MT_LOG("handheld %s", hold ? "in hand" : "put away");
+    myX = p[0]; myY = p[1]; inVehicle = in != 0; holding = hold;
     if (id != myVeh && (id || !in)) {  // got in, changed vehicle, or got out
         myVeh = id;
         if (id) {
             auto it = vehRadio.find(id);
-            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {channel, code, 0}; it = vehRadio.emplace(id, r).first; }
-            channel = it->second.ch; code = it->second.code;
-            notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code) + "  (this vehicle's radio)");
+            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {khz, 0}; it = vehRadio.emplace(id, r).first; }
+            khz = it->second.khz;
+            notice(label(khz) + "  (this vehicle's radio)");
             helloNow = true;
-        } else if (channel != footCh || code != footCode) {
-            channel = footCh; code = footCode;
-            notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code) + "  (handheld)");
+        } else if (khz != footKhz) {
+            khz = footKhz;
+            notice(label(khz) + "  (handheld)");
         }
-        MT_LOG("vehicle %lld: radio on %d / code %d", (long long)id, channel, code);
+        MT_LOG("vehicle %lld: radio on %d kHz", (long long)id, khz);
     }
 }
 // under mu: the channel or code was changed here -- it is the vehicle's while we sit in one, the handheld's on foot
 static void radioChanged() {
-    if (myVeh) { VehRadio& r = vehRadio[myVeh]; r.ch = channel; r.code = code; r.ver++; saveVeh(myVeh, r); helloNow = true; }
-    else { footCh = channel; footCode = code; }
+    if (myVeh) { VehRadio& r = vehRadio[myVeh]; r.khz = khz; r.ver++; saveVeh(myVeh, r); helloNow = true; }
+    else footKhz = khz;
     saveSettings();
 }
 
@@ -369,13 +397,13 @@ struct Packet { uint32_t magic; uint8_t type, flags; uint16_t seq; uint32_t key;
 enum { P_HELLO = 1, P_VOICE = 2, P_END = 3 };
 static const int HEAD = (int)offsetof(Packet, ulaw);
 #pragma pack(push, 1)
-struct HelloVeh { int64_t veh; uint8_t ch, code; uint32_t ver; };  // after a hello's head: the vehicle we sit in and its radio
+struct HelloVeh { int64_t veh; uint16_t khz; uint32_t ver; };  // after a hello's head: the vehicle we sit in and its radio
 #pragma pack(pop)
 static_assert(sizeof(HelloVeh) == 14, "hello vehicle block is 14 bytes");
 static const int HELLO = HEAD + (int)sizeof(HelloVeh);              // older plugins read only the head
 static void fillHello(Packet& p) {  // under mu
-    HelloVeh h{myVeh, 0, 0, 0};
-    if (myVeh) { const VehRadio& r = vehRadio[myVeh]; h.ch = (uint8_t)r.ch; h.code = (uint8_t)r.code; h.ver = r.ver; }
+    HelloVeh h{myVeh, 0, 0};
+    if (myVeh) { const VehRadio& r = vehRadio[myVeh]; h.khz = (uint16_t)r.khz; h.ver = r.ver; }
     memcpy(p.ulaw, &h, sizeof h);
 }
 static void sendTo(uint64_t sid, const Packet& p, int n) {
@@ -432,6 +460,8 @@ struct Station {
     bool ended = false, beep = false;
     float s = 1, dist = 0, gate = 1, gateT = 1, fade = 0, rate = 1, crack = 0;
     int crackN = 0, hop = 0;
+    bool off = false;  // tuned 5 kHz away: AM splatter
+    float spl = 0;
     Band hiss;
     Rng r;
     std::string name;
@@ -440,7 +470,7 @@ static std::map<uint64_t, Station> stations;  // id 1 is the radio check (parrot
 static std::vector<float> local;              // our own beeps, mixed in once
 static std::vector<std::array<int16_t, FRAME>> parrotTape;
 static float scope[64], txLevel;
-static std::atomic<bool> talking{false}, pttPanel{false};
+static std::atomic<bool> talking{false};
 
 static float signalAt(double km) { double v = 1 - km / rangeKm; return v <= 0 ? 0 : (float)pow(v, 0.6); }
 static float sample(Station& t, int i, const int16_t* f) {
@@ -454,6 +484,7 @@ static float sample(Station& t, int i, const int16_t* f) {
         return (at < a ? tone(1200, at, a, 0.4f) : tone(900, at - a, SR * 90 / 1000, 0.4f)) * (0.5f + 0.5f * s);
     }
     float x = f ? f[i] / 32768.f : 0;
+    if (t.off) { t.spl += 2 * 3.14159265f * 170 / SR; x = tanhf(4 * x) * 0.5f * (0.55f + 0.45f * sinf(t.spl)); }
     t.fade += 2 * 3.14159265f * t.rate / SR;
     float fade = 1 - (1 - s) * 0.55f * (0.5f + 0.5f * sinf(t.fade));
     if (t.crackN > 0) { t.crackN--; out += t.r.gauss() * t.crack * (1 - s * 0.7f); }
@@ -473,7 +504,7 @@ static void mix(float* out) {
         if (t.st == Station::IDLE) {
             if (t.q.size() >= 2) {
                 t.st = Station::CHUNK; t.n = SR * 35 / 1000;
-                char m[160]; snprintf(m, sizeof m, "CB %d  <  %s  %.1f km  S%d", channel, t.name.empty() ? "Unknown station" : t.name.c_str(), t.dist, (int)fmaxf(1, roundf(t.s * 9)));
+                char m[200]; snprintf(m, sizeof m, "%s  <  %s  %.1f km  S%d", label(khz).c_str(), t.name.empty() ? "Unknown station" : t.name.c_str(), t.dist, (int)fmaxf(1, roundf(t.s * 9)));
                 notice(m);
             }
             else if (t.q.empty() && now - t.last > 5000) { it = stations.erase(it); continue; }
@@ -566,14 +597,14 @@ static void received(uint64_t from, const Packet& p, int n) {
         if (n >= HELLO) {
             HelloVeh h; memcpy(&h, p.ulaw, sizeof h);
             peerVeh[from] = h.veh;
-            if (h.veh && h.veh == myVeh && h.ch >= 1 && h.ch <= 40 && h.code < 100) {  // someone in our vehicle: the newer setting wins
+            if (h.veh && h.veh == myVeh && h.khz >= KHZ_MIN && h.khz <= KHZ_MAX) {  // someone in our vehicle: the newer setting wins
                 VehRadio& r = vehRadio[myVeh];
-                if (h.ver > r.ver || (h.ver == r.ver && (h.ch != r.ch || h.code != r.code) && from < mySid)) {
-                    r = {h.ch, h.code, h.ver}; saveVeh(myVeh, r);
-                    if (channel != h.ch || code != h.code) {
-                        channel = h.ch; code = h.code;
+                if (h.ver > r.ver || (h.ver == r.ver && h.khz != r.khz && from < mySid)) {
+                    r = {h.khz, h.ver}; saveVeh(myVeh, r);
+                    if (khz != h.khz) {
+                        khz = h.khz;
                         std::string who; for (auto& pl : players) if (pl.sid == from) who = pl.name;
-                        notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code) + "  (set by " + (who.empty() ? "a passenger" : who) + ")");
+                        notice(label(khz) + "  (set by " + (who.empty() ? "a passenger" : who) + ")");
                     }
                 }
             }
@@ -581,14 +612,15 @@ static void received(uint64_t from, const Packet& p, int n) {
         if (!(p.flags & 1)) { Packet r = p; r.flags = 1; r.x = (float)myX; r.y = (float)myY; fillHello(r); sendTo(from, r, HELLO); }  // answer once
         return;
     }
-    if (p.key != myKey() || (!inVehicle && !handheld)) return;
+    int df = abs((int)p.key - khz);
+    if (df > 5 || (!inVehicle && !holding)) return;  // 5 kHz off still gets through, garbled
     if (gameVoice && myVeh) { auto pv = peerVeh.find(from); if (pv != peerVeh.end() && pv->second == myVeh) return; }  // in our cab: heard in person
-    float s = signalAt(km);
+    float s = signalAt(km) * (df ? 0.45f : 1);
     auto it = stations.find(from);
     if (s <= 0 || (it == stations.end() && s * 100 < squelchPct)) return;  // out of range, or under the squelch
     Station& t = stations[from];
     if (t.name.empty()) { t.r.s ^= (uint32_t)from; t.rate = 0.7f + 1.3f * t.r.uni(); for (auto& pl : players) if (pl.sid == from) t.name = pl.name; if (from == 2) t.name = "Loopback"; }
-    t.s = s; t.dist = (float)km; t.last = GetTickCount();
+    t.s = s; t.dist = (float)km; t.last = GetTickCount(); t.off = df != 0;
     if (p.type == P_END) { t.ended = true; t.beep = (p.flags & 2) != 0; return; }
     if (n < (int)sizeof(Packet)) return;
     if (t.st == Station::TAIL || t.st == Station::ROGER) { t.st = Station::IDLE; t.q.clear(); }
@@ -658,16 +690,23 @@ static void keyThread() {
     while (!api->stopping()) {
         bool f = gameFocused() && !chatOpen, ctl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         bool key = f && !ctl && (GetAsyncKeyState(kTalk) & 0x8000);
-        bool want = (key || pttPanel) && (inVehicle || handheld || parrot);
+        bool want = key && (inVehicle || holding || parrot);
         bool nx = f && (GetAsyncKeyState(kNext) & 0x8000) != 0, pn = f && ctl && (GetAsyncKeyState(kPanel) & 0x8000) != 0;
         if (nx && !nextDown) {
-            { std::lock_guard<std::mutex> g(mu); channel = ctl ? (channel + 38) % 40 + 1 : channel % 40 + 1; radioChanged();
-              notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code)); }
-            localBeep({1750, channel == 9 ? 2400.f : channel == 19 ? 2000.f : 1750.f});
+            int c;
+            { std::lock_guard<std::mutex> g(mu);  // the next band-plan channel above (Ctrl: below) the frequency, wrapping
+              int best = 0;
+              for (int i = 1; i <= 40; i++) {
+                  int k = chKhz(i);
+                  if (ctl ? (k < khz && (!best || k > chKhz(best))) : (k > khz && (!best || k < chKhz(best)))) best = i;
+              }
+              if (!best) best = ctl ? 40 : 1;
+              khz = chKhz(best); c = best; radioChanged(); notice(label(khz)); }
+            localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
         if (pn && !panelDown) openPanel();
         nextDown = nx; panelDown = pn;
-        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice("CB: the rig is in your vehicle. On foot: Handheld in the panel (Ctrl+Home)"); }
+        if (key && !want && !keyDown) { std::lock_guard<std::mutex> g(mu); notice("CB: the rig is in your vehicle. On foot, hold a CB Handheld (tech store)"); }
         keyDown = key;
         if (want && !was) {  // key up
             WAVEFORMATEX wf{WAVE_FORMAT_PCM, 1, SR, SR * 2, 2, 16, 0};
@@ -747,18 +786,9 @@ static const unsigned char PANEL[] = {
 };
 static int panelPort;
 // " - Truckers" for the built-in channels and the player's own presets ("Name|ch|code;..."); "" for none.
-static std::string presetName(int ch, int cd) {
+static std::string presetName(int ch) {
     static const struct { int ch; const char* n; } fixed[] = {{9, "Emergency"}, {19, "Truckers"}, {17, "Coast road"}, {14, "Towing"},
         {21, "Taxi & bus"}, {27, "Delivery"}, {33, "Racing"}, {3, "Marine"}};
-    std::string all(presets.begin(), presets.end()), out;
-    for (size_t at = 0; at < all.size();) {
-        size_t e = all.find(';', at); if (e == std::string::npos) e = all.size();
-        std::string it = all.substr(at, e - at);
-        size_t a = it.find('|'), b = a == std::string::npos ? a : it.find('|', a + 1);
-        if (b != std::string::npos && atoi(it.c_str() + a + 1) == ch && atoi(it.c_str() + b + 1) == cd) return "  -  " + it.substr(0, a);
-        at = e + 1;
-    }
-    if (cd) return "  -  privacy " + std::to_string(cd);
     for (auto& f : fixed) if (f.ch == ch) return std::string("  -  ") + f.n;
     return "";
 }
@@ -773,12 +803,12 @@ static std::string stateJson() {
     std::lock_guard<std::mutex> g(mu);  // also guards the two lists: every request has its own thread
     if (!asked || GetTickCount() - asked > 3000) { asked = GetTickCount(); mics = devices(true); spks = devices(false); }
     char b[640];
-    snprintf(b, sizeof b, "{\"ch\":%d,\"freq\":\"%s\",\"code\":%d,\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"handheld\":%d,"
+    snprintf(b, sizeof b, "{\"ch\":%d,\"khz\":%d,\"vol\":%d,\"sq\":%d,\"mic\":%d,\"roger\":%d,\"holding\":%d,"
              "\"parrot\":%d,\"parrotS\":%d,\"range\":%.1f,\"tx\":%d,\"txLevel\":%.2f,\"inVeh\":%d,\"veh\":%d,\"gamevoice\":%d,\"steam\":%d,\"me\":\"%s\",\"inSession\":%d,\"x\":%.0f,\"y\":%.0f,",
-             channel, FREQ[channel], code, volume, squelchPct, micGain, roger, handheld, parrot, parrotS, rangeKm, talking ? 1 : 0,
+             chOf(khz), khz, volume, squelchPct, micGain, roger, holding ? 1 : 0, parrot, parrotS, rangeKm, talking ? 1 : 0,
              txLevel, inVehicle ? 1 : 0, myVeh ? 1 : 0, gameVoice, steam.nm ? 1 : 0, jesc(myName).c_str(), (int)players.size(), myX, myY);
     std::string j = b;
-    j += "\"presets\":\"" + jesc(utf8(presets)) + "\",\"micDev\":\"" + jesc(utf8(micDev)) + "\",\"spkDev\":\"" + jesc(utf8(spkDev)) + "\",\"mics\":[";
+    j += "\"micDev\":\"" + jesc(utf8(micDev)) + "\",\"spkDev\":\"" + jesc(utf8(spkDev)) + "\",\"mics\":[";
     for (auto& d : mics) j += "\"" + jesc(utf8(d)) + "\",";
     if (j.back() == ',') j.pop_back();
     j += "],\"spks\":[";
@@ -804,31 +834,28 @@ static std::string stateJson() {
 }
 static void apply(const std::string& q) {  // k=v&k=v
     std::lock_guard<std::mutex> g(mu);
-    int wasCh = channel, wasCode = code;
+    int was = khz;
     size_t at = 0;
     while (at < q.size()) {
         size_t amp = q.find('&', at); if (amp == std::string::npos) amp = q.size();
         std::string kv = q.substr(at, amp - at), k = kv.substr(0, kv.find('=')), v = kv.find('=') == std::string::npos ? "" : kv.substr(kv.find('=') + 1);
         int n = atoi(v.c_str());
         auto clamp = [](int x, int lo, int hi) { return x < lo ? lo : x > hi ? hi : x; };
-        if (k == "ch") channel = clamp(n, 1, 40);
-        else if (k == "code") code = clamp(n, 0, 99);
+        if (k == "ch") { if (chKhz(n)) khz = chKhz(n); }
+        else if (k == "khz") khz = snapKhz(n);
+        else if (k == "step") khz = snapKhz(khz + 5 * clamp(n, -200, 200));
         else if (k == "vol") volume = clamp(n, 0, 150);
         else if (k == "sq") squelchPct = clamp(n, 0, 95);
         else if (k == "mic") micGain = clamp(n, 10, 300);
         else if (k == "roger") roger = n ? 1 : 0;
-        else if (k == "handheld") handheld = n ? 1 : 0;
         else if (k == "gamevoice") gameVoice = n ? 1 : 0;
         else if (k == "parrot") parrot = n ? 1 : 0;
         else if (k == "parrotS") parrotS = clamp(n, 1, 100);
-        else if (k == "ptt") pttPanel = n != 0;
-        else if (k == "presets") presets = fromUrl(v).substr(0, 900);  // "Name|ch|code;..."
         else if (k == "micDev") micDev = fromUrl(v);
         else if (k == "spkDev") { spkDev = fromUrl(v); reopenOut = true; }
         at = amp + 1;
     }
-    if (channel != wasCh || code != wasCode) radioChanged();
-    if (channel != wasCh || code != wasCode) notice("CB " + std::to_string(channel) + "  " + FREQ[channel] + " MHz" + presetName(channel, code));
+    if (khz != was) { radioChanged(); notice(label(khz)); }
     saveSettings();
 }
 static void serve(SOCKET c) {
@@ -866,7 +893,8 @@ static void openPanel() {
 
 static bool selfCheck() {
     for (int v = -32000; v <= 32000; v += 97) { int d = ulawDec(ulawEnc((int16_t)v)) - v; if (abs(d) > 1100 || (abs(v) < 200 && abs(d) > 20)) return false; }
-    if (strcmp(FREQ[19], "27.185") || strcmp(FREQ[9], "27.065") || strcmp(FREQ[40], "27.405")) return false;
+    if (chKhz(19) != 27185 || chKhz(9) != 27065 || chKhz(40) != 27405 || chKhz(23) != 27255 || chOf(27190) || chOf(27185) != 19) return false;
+    if (snapKhz(27187) != 27185 || snapKhz(27188) != 27190 || snapKhz(1) != KHZ_MIN || snapKhz(99999) != KHZ_MAX) return false;
     double r = rangeKm; rangeKm = 10;
     bool ok = signalAt(0) == 1 && signalAt(10) == 0 && signalAt(5) > 0.5f && signalAt(5) < 0.8f;
     rangeKm = r;
@@ -900,7 +928,7 @@ extern "C" __declspec(dllexport) int PluginInit(const MtApi* a) {
     loadSettings();
     loadDebug();
     if (!selfCheck()) { MT_LOG("self-check FAILED -- not started"); return 0; }
-    MT_LOG("CB radio: channel %d (%s MHz), code %d, range %.1f km", channel, FREQ[channel], code, rangeKm);
+    MT_LOG("CB radio: %s, range %.1f km", label(khz).c_str(), rangeKm);
     CloseHandle(CreateThread(nullptr, 0, run, nullptr, 0, nullptr));
     return 0;
 }
