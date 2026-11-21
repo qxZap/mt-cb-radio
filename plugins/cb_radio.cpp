@@ -504,8 +504,6 @@ static void mix(float* out) {
         if (t.st == Station::IDLE) {
             if (t.q.size() >= 2) {
                 t.st = Station::CHUNK; t.n = SR * 35 / 1000;
-                char m[200]; snprintf(m, sizeof m, "%s  <  %s  %.1f km  S%d", label(khz).c_str(), t.name.empty() ? "Unknown station" : t.name.c_str(), t.dist, (int)fmaxf(1, roundf(t.s * 9)));
-                notice(m);
             }
             else if (t.q.empty() && now - t.last > 5000) { it = stations.erase(it); continue; }
         }
@@ -694,13 +692,16 @@ static void keyThread() {
         bool nx = f && (GetAsyncKeyState(kNext) & 0x8000) != 0, pn = f && ctl && (GetAsyncKeyState(kPanel) & 0x8000) != 0;
         if (nx && !nextDown) {
             int c;
-            { std::lock_guard<std::mutex> g(mu);  // the next band-plan channel above (Ctrl: below) the frequency, wrapping
-              int best = 0;
-              for (int i = 1; i <= 40; i++) {
-                  int k = chKhz(i);
-                  if (ctl ? (k < khz && (!best || k > chKhz(best))) : (k > khz && (!best || k < chKhz(best)))) best = i;
+            { std::lock_guard<std::mutex> g(mu);  // by channel number (23 sits out of order on the band); off a channel, the nearest
+              int best = chOf(khz);
+              if (best) best = ctl ? (best + 38) % 40 + 1 : best % 40 + 1;
+              else {
+                  for (int i = 1; i <= 40; i++) {
+                      int k = chKhz(i);
+                      if (ctl ? (k < khz && (!best || k > chKhz(best))) : (k > khz && (!best || k < chKhz(best)))) best = i;
+                  }
+                  if (!best) best = ctl ? 40 : 1;
               }
-              if (!best) best = ctl ? 40 : 1;
               khz = chKhz(best); c = best; radioChanged(); notice(label(khz)); }
             localBeep({1750, c == 9 ? 2400.f : c == 19 ? 2000.f : 1750.f});
         }
@@ -814,21 +815,18 @@ static std::string stateJson() {
     j += "],\"spks\":[";
     for (auto& d : spks) j += "\"" + jesc(utf8(d)) + "\",";
     if (j.back() == ',') j.pop_back();
-    j += "],\"stations\":[";
+    // what a CB shows: the signal on the meter and how many rigs are in range -- never who is talking or where
+    j += "],\"rx\":[";
     bool first = true;
     for (auto& e : stations) {
         if (e.second.st == Station::IDLE) continue;
-        snprintf(b, sizeof b, "%s{\"n\":\"%s\",\"km\":%.2f,\"s\":%.2f}", first ? "" : ",", jesc(e.second.name.empty() ? "Unknown station" : e.second.name).c_str(), e.second.dist, e.second.s);
+        snprintf(b, sizeof b, "%s%.2f", first ? "" : ",", e.second.s);
         j += b; first = false;
     }
-    j += "],\"peers\":[";
-    first = true;
-    for (auto& e : peers) {
-        std::string n = "?"; for (auto& p : players) if (p.sid == e.first) n = p.name;
-        snprintf(b, sizeof b, "%s{\"n\":\"%s\",\"km\":%.2f,\"s\":%.2f}", first ? "" : ",", jesc(n).c_str(), e.second.second, signalAt(e.second.second));
-        j += b; first = false;
-    }
-    j += "],\"scope\":[";
+    int inRange = 0;
+    for (auto& e : peers) if (e.second.second <= rangeKm && GetTickCount() - e.second.first < 12000) inRange++;
+    snprintf(b, sizeof b, "],\"rigs\":%d,\"scope\":[", inRange);
+    j += b;
     for (int i = 0; i < 64; i++) { snprintf(b, sizeof b, "%s%.3f", i ? "," : "", scope[i]); j += b; }
     return j + "]}";
 }

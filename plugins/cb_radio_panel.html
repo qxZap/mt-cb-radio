@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QX-40 CB Radio</title>
+<title>Motortown CB</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <style>
@@ -48,7 +48,7 @@ body{margin:0;background:radial-gradient(1100px 600px at 50% -15%,#26231e,var(--
 .knob .v{font:13px "Share Tech Mono",monospace;color:var(--amber)}
 .big .k{font-size:13px}
 /* tuning strip */
-.tune{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto auto;gap:8px;align-items:center;margin-top:18px}
+.tune{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;gap:8px;align-items:center;margin-top:18px}
 @media (max-width:620px){.tune{grid-template-columns:1fr 1fr}.tune .dial{grid-column:1/-1;order:-1}}
 button{font:inherit;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#e9e9e6;background:linear-gradient(180deg,#3b3b40,#1d1d21);border:1px solid #000;border-radius:6px;padding:8px 12px;cursor:pointer;box-shadow:0 3px 0 #000,inset 0 1px 0 #ffffff22}
 button:active{transform:translateY(2px);box-shadow:0 1px 0 #000,inset 0 1px 0 #ffffff22}
@@ -59,7 +59,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
 .scale i.ch{height:9px}.scale i.ch.m{height:14px;background:#000}
 .scale b{position:absolute;top:13px;font:10px "Share Tech Mono",monospace;color:#3b2a10;transform:translateX(-50%)}
 .scale .band{position:absolute;top:0;bottom:0;background:#ffffff55;border-left:1px solid #3b2a10;border-right:1px solid #3b2a10}
-.scale .ptr{position:absolute;top:-3px;bottom:-3px;width:3px;background:var(--seg);box-shadow:0 0 6px var(--seg);transform:translateX(-1px)}
+.scale .ptr{position:absolute;top:-3px;bottom:-3px;width:3px;background:var(--seg);box-shadow:0 0 6px var(--seg);transform:translateX(-1px);transition:left .45s cubic-bezier(.25,.8,.3,1)}
+.scale.drag .ptr{transition:none}
 .dial input{position:absolute;inset:0;width:100%;opacity:0;cursor:ew-resize;margin:0}
 .fin{display:flex;align-items:center;gap:6px}
 .fin input{width:96px;font:20px "Share Tech Mono",monospace;background:#0b0201;color:var(--seg);border:2px solid #000;border-radius:5px;padding:4px 8px;text-align:right;min-width:0}
@@ -97,7 +98,9 @@ h2{font-size:13px;letter-spacing:.3em;text-transform:uppercase;color:var(--dim);
 .list .km{font-family:"Share Tech Mono",monospace;color:var(--dim);text-align:right}
 .mini{display:grid;grid-template-columns:repeat(9,1fr);gap:2px;height:10px}
 .mini i{background:#3a0e09}.mini i.on{background:var(--seg)}
-.talk{color:var(--green)}
+.rigs{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.rigs .num{font:44px "Share Tech Mono",monospace;color:var(--seg);text-shadow:0 0 10px #ff3b2688;min-width:2ch}
+.rigs .note{margin:0}
 .empty{color:var(--dim);font-size:14px}
 details{margin-top:16px}
 summary{cursor:pointer;font-size:13px;letter-spacing:.3em;text-transform:uppercase;color:var(--dim);font-weight:600}
@@ -109,11 +112,11 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 
 <div class="radio"><div class="face">
   <span class="screw s1"></span><span class="screw s2"></span><span class="screw s3"></span><span class="screw s4"></span><span class="mic" aria-hidden="true"></span>
-  <div class="brandrow"><div class="brand">QX-40<small>40 CH AM &middot; 25.615&ndash;28.305 MHz</small></div><div class="status" id="stat">connecting&hellip;</div></div>
+  <div class="brandrow"><div class="brand">MOTORTOWN CB<small>40 CH AM &middot; 25.615&ndash;28.305 MHz</small></div><div class="status" id="stat">connecting&hellip;</div></div>
   <div class="main">
     <div class="meter" aria-label="Signal meter"><svg viewBox="0 0 250 160" id="meterSvg">
-      <path d="M30 120 A110 110 0 0 1 220 120" fill="none" stroke="#3b2a10" stroke-width="2"/>
-      <path d="M163 64 A110 110 0 0 1 220 120" fill="none" stroke="#b3261a" stroke-width="5"/>
+      <path id="arc" fill="none" stroke="#3b2a10" stroke-width="2"/>
+      <path id="arcHot" fill="none" stroke="#b3261a" stroke-width="5"/>
       <g id="ticks"></g>
       <text x="125" y="96" text-anchor="middle" font-family="Barlow Condensed" font-weight="700" font-size="15" fill="#3b2a10" letter-spacing="3">S &middot; RF</text>
       <text x="125" y="114" text-anchor="middle" font-family="Share Tech Mono" font-size="10" fill="#6b4d1c" id="mLab">SIGNAL</text>
@@ -132,11 +135,11 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
   </div>
 
   <div class="tune">
-    <button id="chDn" aria-label="Previous channel">&#9660; CH</button>
-    <button id="fDn" aria-label="Down 5 kHz">&minus;5k</button>
+    <button id="fDn" aria-label="Down 5 kHz">&minus;5 kHz</button>
     <div class="dial"><div class="scale" id="scale"><span class="ptr" id="ptr"></span></div>
       <input type="range" id="band" min="25615" max="28305" step="5" aria-label="Frequency"></div>
-    <button id="fUp" aria-label="Up 5 kHz">+5k</button>
+    <button id="fUp" aria-label="Up 5 kHz">+5 kHz</button>
+    <button id="chDn" aria-label="Previous channel">CH &#9660;</button>
     <button id="chUp" aria-label="Next channel">CH &#9650;</button>
   </div>
   <div class="lower">
@@ -159,10 +162,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 <div class="keys"><span><kbd>Home</kbd> hold to talk (also keys game voice)</span><span><kbd>End</kbd> next channel</span><span><kbd>Ctrl</kbd>+<kbd>End</kbd> previous</span><span><kbd>Ctrl</kbd>+<kbd>Home</kbd> this panel</span></div>
 <div class="warn" id="warn" hidden></div>
 
-<div class="grid">
-  <div><h2>On the air</h2><div class="card"><ul class="list" id="air"></ul></div></div>
-  <div><h2>Rigs in range</h2><div class="card"><ul class="list" id="peers"></ul></div></div>
-</div>
+<h2>Rigs in range</h2><div class="card rigs"><span class="num" id="rigs">0</span><span class="note" id="rigsNote">No other rig heard yet. Players need the CB Radio plugin too.</span></div>
 <details><summary>Audio</summary><div class="card" style="margin-top:10px">
   <div class="dev"><label for="micDev">Mic</label><select id="micDev"></select><label for="spkDev">Speaker</label><select id="spkDev"></select></div>
   <div class="note">System default follows Windows. Pick the same devices your game uses if they differ.</div>
@@ -172,7 +172,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 const CH=[0,26965,26975,26985,27005,27015,27025,27035,27055,27065,27075,27085,27105,27115,27125,27135,27155,27165,27175,27185,27205,27215,27225,27255,27235,27245,27265,27275,27285,27295,27305,27315,27325,27335,27345,27355,27365,27375,27385,27395,27405];
 const PUB=[[9,"Emergency"],[19,"Truckers"],[17,"Coast road"],[14,"Towing"],[21,"Taxi & bus"],[27,"Delivery"],[33,"Racing"],[3,"Marine"]];
 const LO=25615,HI=28305;
-let st=null,busy=false;
+let st=null,busy=false,tuneTo=null,tuneAt=0;
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const set=q=>fetch("/set?"+q).then(r=>r.json()).then(s=>{st=s;draw()}).catch(()=>{});
@@ -187,7 +187,10 @@ function seg(text){let x=0,out="";for(const ch of text){if(ch=="."){out+=`<rect 
  return `<svg viewBox="-2 -1 ${x+2} 36" aria-hidden="true"><defs><filter id="glow"><feGaussianBlur stdDeviation=".6"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>${out}</svg>`}
 
 /* meter scale: S1..9 then +20 +40 */
-(function(){const g=$("ticks");let h="";const marks=[["1",0],["3",.15],["5",.3],["7",.45],["9",.6],["+20",.8],["+40",1]];
+(function(){const pt=(t,r)=>{const a=(-60+120*t)*Math.PI/180;return [125+r*Math.sin(a),150-r*Math.cos(a)]};
+ const arc=(t0,t1,r)=>{const a=pt(t0,r),b=pt(t1,r);return `M${a[0].toFixed(2)} ${a[1].toFixed(2)} A${r} ${r} 0 0 1 ${b[0].toFixed(2)} ${b[1].toFixed(2)}`};
+ $("arc").setAttribute("d",arc(0,1,108));$("arcHot").setAttribute("d",arc(.6,1,105.5));
+ const g=$("ticks");let h="";const marks=[["1",0],["3",.15],["5",.3],["7",.45],["9",.6],["+20",.8],["+40",1]];
  for(let i=0;i<=40;i++){const t=i/40,a=(-60+120*t)*Math.PI/180,r1=108,r2=i%5?102:96;
   h+=`<line x1="${125+r1*Math.sin(a)}" y1="${150-r1*Math.cos(a)}" x2="${125+r2*Math.sin(a)}" y2="${150-r2*Math.cos(a)}" stroke="${t>.6?"#b3261a":"#3b2a10"}" stroke-width="${i%5?1:1.6}"/>`}
  for(const [l,t] of marks){const a=(-60+120*t)*Math.PI/180;h+=`<text x="${125+86*Math.sin(a)}" y="${150-86*Math.cos(a)+4}" text-anchor="middle" font-family="Share Tech Mono" font-size="11" fill="${t>.6?"#b3261a":"#3b2a10"}">${l}</text>`}
@@ -227,37 +230,39 @@ const kPr=knob($("kPr"),"Check at",1,100,1,x=>"S-"+sUnits(x/100),debounce(x=>set
 for(const [c,n] of PUB){const b=document.createElement("button");b.className="chb";b.dataset.ch=c;b.innerHTML=`<span class="n">${String(c).padStart(2,"0")}</span><span class="d">${esc(n)}</span>`;b.onclick=()=>set("ch="+c);$("chans").append(b)}
 const chName=c=>(PUB.find(p=>p[0]==c)||[])[1]||"";
 
-function li(n,km,s,talk){const l=document.createElement("li");const u=sUnits(s);
- l.innerHTML=`<span class="nm ${talk?"talk":""}">${talk?"&#9679; ":""}${esc(n)}</span><span class="km">${km.toFixed(1)} km</span><span class="mini">${"<i></i>".repeat(9)}</span>`;
- [...l.querySelectorAll(".mini i")].forEach((e,i)=>e.classList.toggle("on",i<u));return l}
 function draw(){if(!st)return;const s=st;
- $("chSeg").innerHTML=seg(s.ch?String(s.ch).padStart(2," "):"--");
- $("fqSeg").innerHTML=seg(mhz(s.khz));
- const rx=s.stations.length?Math.max(...s.stations.map(x=>x.s)):0;
+ if(tuneTo!==null&&(s.khz===tuneTo||Date.now()-tuneAt>2000))tuneTo=null;
+ const k=tuneTo!==null?tuneTo:s.khz,c=CH.indexOf(k);
+ $("chSeg").innerHTML=seg(c>0?String(c).padStart(2," "):"--");
+ $("fqSeg").innerHTML=seg(mhz(k));
+ const rx=(s.rx||[]).length?Math.max(...s.rx):0;
  needle(s.tx?s.txLevel:rx*0.6+(rx>0.85?(rx-0.85)/0.15*0.4:0));$("mLab").textContent=s.tx?"RF POWER":"SIGNAL";
  const fl={fRx:rx>0&&!s.tx,fTx:!!s.tx,fRb:!!s.roger,fSq:s.sq>0,fPr:!!s.parrot,fVeh:!!s.veh,fHh:!!s.holding,fGv:!!s.gamevoice};
  for(const k in fl)$(k).classList.toggle("on",fl[k]);
- $("who").textContent=s.tx?"TRANSMITTING":s.stations.length?s.stations.map(x=>x.n).join(" + "):(s.ch?chName(s.ch).toUpperCase():"");
+ $("who").textContent=s.tx?"TRANSMITTING":(s.ch?chName(s.ch).toUpperCase():"");
  if(!kCh.busy())kCh.show(s.ch||1);if(!kVol.busy())kVol.show(s.vol);if(!kSq.busy())kSq.show(s.sq);if(!kMic.busy())kMic.show(s.mic);if(!kPr.busy())kPr.show(s.parrotS);
  $("prRow").hidden=!s.parrot;
  for(const [id,on] of [["tRb",s.roger],["tPr",s.parrot],["tGv",s.gamevoice]])$(id).setAttribute("aria-pressed",on?"true":"false");
- if(document.activeElement!==$("band"))$("band").value=s.khz;$("ptr").style.left=((s.khz-LO)/(HI-LO)*100)+"%";
- if(document.activeElement!==$("fType"))$("fType").value=mhz(s.khz);
+ if(tuneTo===null)$("band").value=k;$("ptr").style.left=((k-LO)/(HI-LO)*100)+"%";
+ if(document.activeElement!==$("fType"))$("fType").value=mhz(k);
  document.querySelectorAll(".chb").forEach(b=>b.classList.toggle("on",+b.dataset.ch===s.ch));
  $("stat").innerHTML=`<b>${esc(s.me||"-")}</b> &middot; ${s.steam?"steam ok":"no steam"} &middot; ${s.inSession} in session &middot; ${s.range} km`;
  const w=!s.inVeh&&!s.holding&&!s.parrot?"On foot: the rig is in your vehicle. Hold a CB Handheld (tech store) to talk on foot, or flip CHECK for a radio check.":!s.steam?"Steam networking is not up: only the radio check works.":"";
  $("warn").hidden=!w;$("warn").textContent=w;
- const air=$("air");air.textContent="";s.stations.forEach(x=>air.append(li(x.n,x.km,x.s,1)));if(!s.stations.length)air.innerHTML='<li class="empty">Nobody is talking on this frequency.</li>';
- const pe=$("peers");pe.textContent="";s.peers.forEach(x=>pe.append(li(x.n,x.km,x.s,0)));if(!s.peers.length)pe.innerHTML='<li class="empty">No other rig heard yet. Players need the CB Radio plugin too.</li>';
+ $("rigs").textContent=s.rigs||0;$("rigsNote").textContent=s.rigs?(s.rigs==1?"rig":"rigs")+" within "+s.range+" km":"No other rig in range. Players need the CB Radio plugin too.";
  devs("micDev",s.mics||[],s.micDev||"");devs("spkDev",s.spks||[],s.spkDev||"")}
 function poll(){if(busy)return;busy=true;fetch("/state").then(r=>r.json()).then(s=>{st=s;draw()}).catch(()=>{$("stat").textContent="game not running"}).finally(()=>busy=false)}
 setInterval(poll,120);poll();
 
-const stepCh=d=>{const k=st.khz;let best=0;for(let c=1;c<=40;c++){const x=CH[c];if(d>0?(x>k&&(!best||x<CH[best])):(x<k&&(!best||x>CH[best])))best=c}set("ch="+(best||(d>0?1:40)))};
+const stepCh=d=>{const k=st.khz,cur=CH.indexOf(k);let best=0;
+ if(cur>0)best=(cur-1+d+40)%40+1;  // by number: 23 sits out of order on the band
+ else{for(let c=1;c<=40;c++){const x=CH[c];if(d>0?(x>k&&(!best||x<CH[best])):(x<k&&(!best||x>CH[best])))best=c}best=best||(d>0?1:40)}
+ set("ch="+best)};
 $("chUp").onclick=()=>stepCh(1);$("chDn").onclick=()=>stepCh(-1);
 $("fUp").onclick=()=>set("step=1");$("fDn").onclick=()=>set("step=-1");
-$("band").oninput=e=>{$("ptr").style.left=((e.target.value-LO)/(HI-LO)*100)+"%";$("fqSeg").innerHTML=seg(mhz(+e.target.value))};
-$("band").onchange=e=>set("khz="+e.target.value);
+$("band").oninput=e=>{tuneTo=+e.target.value;tuneAt=Date.now()+1e9;$("scale").classList.add("drag");draw()};  // held while the drag lasts
+$("band").onchange=e=>{tuneTo=+e.target.value;tuneAt=Date.now();$("scale").classList.remove("drag");set("khz="+e.target.value)};
+$("band").addEventListener("pointerup",()=>{if(tuneAt>Date.now())tuneAt=Date.now();$("scale").classList.remove("drag")});
 $("fType").addEventListener("keydown",e=>{if(e.key!=="Enter")return;const v=parseFloat(e.target.value.replace(",","."));if(!isFinite(v))return;
  const k=Math.round((v<100?v*1000:v));e.target.blur();set("khz="+k)});
 $("tRb").onclick=()=>set("roger="+(st.roger?0:1));$("tPr").onclick=()=>set("parrot="+(st.parrot?0:1));$("tGv").onclick=()=>set("gamevoice="+(st.gamevoice?0:1));
