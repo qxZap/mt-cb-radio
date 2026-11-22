@@ -1,4 +1,4 @@
-# CB Radio
+# Analog Communication
 
 A 40-channel CB rig in every Motor Town vehicle. Hold **Home** to talk; everyone on your channel within range hears you
 through the radio, with hiss, crackle and fading that grow with distance. A plugin for the
