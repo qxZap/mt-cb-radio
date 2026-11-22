@@ -259,7 +259,7 @@ input,select{-webkit-user-select:text;user-select:text}
     <div class="toggles">
       <button class="tog adv" id="tRb" title="Roger beep: a short beep when you let go of the talk key" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>ROGER</button>
       <button class="tog adv" id="tPr" title="Radio check: hear your own over back, as from a station that far away" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>CHECK</button>
-      <button class="tog adv" id="tGv" title="Game voice: talking also keys the game's own voice chat (G)" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>GAME V</button>
+      <button class="tog" id="tGv" title="Game voice: talking also keys the game's own voice chat (G)" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>GAME V</button>
       <button class="tog" id="tPw" title="Power: switch the CB on or off" aria-pressed="false"><span class="led"></span><span class="base"><span class="lever"></span></span>POWER</button>
     </div>
   </div>
@@ -268,8 +268,8 @@ input,select{-webkit-user-select:text;user-select:text}
 <div id="htView" hidden><div class="htwrap"><div class="ht" id="htBody"><div class="off htoff" id="htOff" hidden>You don't own a ham radio yet.<br>Buy one at the tech store (Ham Radio, 1,500), then take it out once with its hotbar number.</div>
   <span class="ant" aria-hidden="true"></span>
   <div class="body"><span class="ptt" id="htPtt" aria-hidden="true"></span>
-    <div class="slide" id="htPower" title="Power: slide up for on" role="switch" tabindex="0" aria-checked="true" aria-label="Handheld power"><span class="track"></span><span class="thumb"></span></div>
-    <span class="plbl pon" id="htOnL">ON</span><span class="plbl poff" id="htOffL">OFF</span>
+    <div class="slide" id="htPower" title="Game voice: slide up and talking also keys the game's own voice chat (G), so the people around hear you in person" role="switch" tabindex="0" aria-checked="true" aria-label="Game voice"><span class="track"></span><span class="thumb"></span></div>
+    <span class="plbl pon" id="htOnL">GAME V</span><span class="plbl poff" id="htOffL">OFF</span>
     <div class="brand2">MOTORTOWN <b>HT-3</b></div>
     <div class="top"><div class="knob" id="kHtCh" title="Channel" tabindex="0" role="slider" aria-label="Handheld channel"></div><span class="led2" id="htLed"></span><div class="knob" id="kHtVol" title="Volume" tabindex="0" role="slider" aria-label="Volume"></div></div>
     <div class="grill" aria-hidden="true"></div>
@@ -465,7 +465,7 @@ function click(){try{actx=actx||new AudioContext();const o=actx.createOscillator
 document.addEventListener("pointerdown",e=>{const b=e.target.closest("button,.slide");if(!b||getComputedStyle(b).pointerEvents=="none")return;
  click();b.classList.remove("flash");void b.offsetWidth;b.classList.add("flash")});
 $("mSimple").onclick=()=>set("mode=1");$("mFull").onclick=()=>set("mode=0");
-$("htPower").onclick=()=>set("rig=ht&power="+(st.ht.on?0:1));
+$("htPower").onclick=()=>set("gamevoice="+(st.gamevoice?0:1));  // the slide is game voice (11-22): the ham is always on
 $("htPower").onkeydown=e=>{if(e.key==" "||e.key=="Enter"){e.preventDefault();$("htPower").click()}};
 $("vCb").onclick=()=>{view="cb";draw()};$("vHt").onclick=()=>{view="ht";draw()};
 for(const i of [0,1,2])$("tx"+i).onclick=()=>set("txmode="+i);
@@ -489,7 +489,7 @@ function htKey(k){if(/^\d$/.test(k)){if(entry.length<5)entry+=k;draw();return}
 function drawHt(s,R){const on=R.on&&R.avail,rx=(s.rx||[]).length?Math.max(...s.rx):0;
  $("htLcd").classList.toggle("dark",!on);
  $("htLed").className="led2"+(on&&s.tx&&(s.txOn&2)?" tx":on&&rx>0?" rx":"");$("htPtt").classList.toggle("on",!!(s.tx&&(s.txOn&2)));
- $("htPower").setAttribute("aria-checked",R.on?"true":"false");$("htOnL").classList.toggle("lit",!!R.on);$("htOffL").classList.toggle("lit",!R.on);$("htPower").classList.toggle("off2",!R.avail);
+ $("htPower").setAttribute("aria-checked",st.gamevoice?"true":"false");$("htOnL").classList.toggle("lit",!!st.gamevoice);$("htOffL").classList.toggle("lit",!st.gamevoice);$("htPower").classList.toggle("off2",!R.avail);
  if(!kHtVol.busy())kHtVol.show(s.vol);if(!kHtCh.busy())kHtCh.show(R.ch||1);$("kHtCh").classList.toggle("off2",!(R.avail));
  [...$("htBars").children].forEach((e,i)=>e.classList.toggle("on",on&&i<Math.ceil(rx*5)));
  $("htTx").textContent=!on?"":s.tx&&(s.txOn&2)?"TX":rx>0?"RX":s.parrot?"CHK":"";
