@@ -37,8 +37,9 @@
 // the power switch are that vehicle's (by Net_VehicleId, the same number on every client), kept in [Vehicles] and announced in every hello,
 // so whoever rides along listens to the vehicle's radio and a change from any seat reaches the others. On foot the
 // handheld's own [Radio] Channel/Code come back. Talking also holds the game's own voice key (G, its push-to-talk:
-// the green 'transmitting' line and proximity voice; [Keys] GameVoice, [Radio] GameVoice=1), so the people in the cab hear you in person -- and get you only that way: the CB
-// stays quiet for someone in the same vehicle.
+// the green 'transmitting' line and proximity voice; [Keys] GameVoice, [Radio] GameVoice=1), so the people in the cab hear you in person -- and get your CB only that way: the CB
+// stays quiet for someone in the same vehicle. A handheld in the cab is another matter (11-22): the vehicle's CB, on and
+// tuned to it, picks it up, so you hear yourself through the car's speaker and so do the passengers.
 //
 // Settings: plugins\cb_radio.ini, written with its defaults on first launch (the panel keeps [Radio] up to date):
 //   [General] Disabled=1                    the plugin starts nothing
@@ -780,7 +781,7 @@ static void mix(float* out) {
         if (t.st != Station::IDLE) open++;
         for (int i = 0; i < FRAME && t.st != Station::IDLE; i++) {
             float v = sample(t, i, have ? f.data() : nullptr);
-            if (!talking || it->first == 2) out[i] += v * t.gain;  // half duplex: keying up drowns everything else (not the loopback test)
+            if (!talking || it->first == 2 || it->first == 3) out[i] += v * t.gain;  // half duplex: keying up drowns everything else (not the loopback test, not our handheld on our own CB)
             if (t.st == Station::CHUNK && --t.n <= 0) t.st = Station::VOICE;
             else if (t.st == Station::ROGER && --t.n <= 0) { t.st = Station::TAIL; t.n = SR * 170 / 1000; }
             else if (t.st == Station::TAIL && --t.n <= 0) { t.st = Station::IDLE; t.ended = false; t.q.clear(); }
@@ -844,6 +845,24 @@ static void playerThread() {
 
 // ---- receiving ----
 static std::map<uint64_t, std::pair<DWORD, float>> peers;  // has the plugin: last heard, km away
+static std::map<uint64_t, std::pair<uint16_t, DWORD>> cabSeq;  // under mu: a cab-mate's last over sent on our CB (seq, when)
+// Our own handheld, heard on the CB of the vehicle we sit in (the user, 11-22: transmitting on the ham with the car's CB on
+// and tuned, you hear yourself in the car, and so do the passengers). Station 3, played even while we are keyed.
+static void monitorOwn(const Packet& p, int n) {
+    std::lock_guard<std::mutex> g(mu);
+    const Rig& cb = rig[CB];
+    if (!inVehicle || !cb.on || !cb.avail || cb.hear <= 0 || abs((int)p.key - cb.khz) > 5) return;
+    Station& t = stations[3];
+    if (t.name.empty()) { t.name = "Own handheld"; t.rate = 1; }
+    t.gain = cb.hear; t.s = 1; t.dist = 0; t.last = GetTickCount(); t.off = (int)p.key != cb.khz;
+    if (p.type == P_END) { t.ended = true; t.beep = (p.flags & F_ROGER) != 0; return; }
+    if (n < (int)sizeof(Packet)) return;
+    if (t.st == Station::TAIL || t.st == Station::ROGER) { t.st = Station::IDLE; t.q.clear(); }
+    t.ended = false;
+    std::array<int16_t, FRAME> f;
+    for (int i = 0; i < FRAME; i++) f[i] = ulawDec(p.ulaw[i]);
+    if (t.q.size() < 25) t.q.push_back(f);
+}
 static void received(uint64_t from, const Packet& p, int n) {
     if (n < HEAD || p.magic != MAGIC) return;
     if (from == mySid) {
@@ -884,7 +903,14 @@ static void received(uint64_t from, const Packet& p, int n) {
         const Rig& g = rig[r];
         int d = abs((int)p.key - g.khz);
         if (!g.on || !g.avail || g.hear <= 0 || d > 5) continue;
-        if (r == CB && gameVoice && myVeh && inVehicle) { auto pv = peerVeh.find(from); if (pv != peerVeh.end() && pv->second == myVeh) continue; }  // in our cab: heard in person
+        if (r == CB && gameVoice && myVeh && inVehicle) {  // in our cab: their CB is ours, it does not hear itself...
+            auto pv = peerVeh.find(from);
+            if (pv != peerVeh.end() && pv->second == myVeh) {
+                auto& c = cabSeq[from];
+                if (!(p.flags & F_HT)) { if (p.type == P_VOICE) c = {p.seq, GetTickCount()}; continue; }
+                if (p.type == P_VOICE && c.first == p.seq && GetTickCount() - c.second < 1000) continue;  // ...nor their handheld while it sends
+            }  // ...but their handheld it hears, like any set in the cab (the user, 11-22)
+        }
         // the sender's range decides (the user, 11-21): a 1000 km ship is heard 1000 km out; a car's 10 km set
         // reaches the ship only within 10 km -- there the two can talk
         double link = p.rk ? p.rk : 10, km2 = hypot(p.x - g.x, p.y - g.y) / 100000.0;
@@ -1074,6 +1100,7 @@ static void keyThread() {
                     for (uint64_t sid : dest[r]) sendTo(sid, out[r], sizeof(Packet));
                     if (loopKm >= 0) sendTo(mySid, out[r], sizeof(Packet));
                 }
+                if ((txs & 3) == 2) monitorOwn(out[HT], sizeof(Packet));  // on the handheld alone: our CB picks it up
                 if (parrot) { std::lock_guard<std::mutex> g(mu); if (parrotTape.size() < 50 * 60) parrotTape.push_back(fr); }
                 h[b].dwFlags &= ~WHDR_DONE;
                 waveInAddBuffer(wi, &h[b], sizeof h[b]);
@@ -1093,6 +1120,7 @@ static void keyThread() {
                       for (auto& pe : peers) if (pe.second.second <= rig[r].range * 1.15) to.push_back(pe.first); }
                     for (uint64_t sid : to) sendTo(sid, e, HEAD);
                     if (loopKm >= 0) sendTo(mySid, e, HEAD);
+                    if (r == HT && (sentOn & 3) == 2) monitorOwn(e, HEAD);
                 }
             }
             talking = false; txOn = 0; txLevel = 0; was = false;
