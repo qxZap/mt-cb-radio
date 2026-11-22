@@ -33,8 +33,8 @@
 // whistle when two talk at once, half duplex (you do not hear while you talk). tools/cb_radio/preview.py is the same
 // chain in Python, for sound previews.
 //
-// The rig belongs to the vehicle (the user, 2026-11-21): in a vehicle, as driver or passenger, the channel and code are
-// that vehicle's (by Net_VehicleId, the same number on every client), kept in [Vehicles] and announced in every hello,
+// The rig belongs to the vehicle (the user, 2026-11-21): in a vehicle, as driver or passenger, the frequency and (11-22)
+// the power switch are that vehicle's (by Net_VehicleId, the same number on every client), kept in [Vehicles] and announced in every hello,
 // so whoever rides along listens to the vehicle's radio and a change from any seat reaches the others. On foot the
 // handheld's own [Radio] Channel/Code come back. Talking also holds the game's own voice key (G, its push-to-talk:
 // the green 'transmitting' line and proximity voice; [Keys] GameVoice, [Radio] GameVoice=1), so the people in the cab hear you in person -- and get you only that way: the CB
@@ -169,13 +169,13 @@ static std::wstring micDev, spkDev;  // devices by name ("" = the system's defau
 static std::atomic<bool> reopenOut{false};
 static int footKhz = 27185, gameVoice = 1;  // the handheld's own frequency; key the game's voice too
 static int64_t myVeh;                                // Net_VehicleId of the vehicle we sit in, 0 on foot (under mu)
-struct VehRadio { int khz; uint32_t ver; };
+struct VehRadio { int khz; uint32_t ver; bool on = true; };  // the CB's frequency and power are the vehicle's (11-22)
 static std::map<int64_t, VehRadio> vehRadio;          // under mu; [Vehicles] id=khz,ver
 static std::map<uint64_t, int64_t> peerVeh;           // under mu: the vehicle each plugin player sits in
 static std::atomic<bool> helloNow{false};
 static void saveVeh(int64_t id, const VehRadio& r) {
     if (id < 0) return;  // a vehicle with no id of its own (below): nothing to keep
-    wchar_t k[24], v[32]; swprintf(k, 24, L"%lld", (long long)id); swprintf(v, 32, L"%d,%u", r.khz, r.ver);
+    wchar_t k[24], v[40]; swprintf(k, 24, L"%lld", (long long)id); swprintf(v, 40, L"%d,%u,%d", r.khz, r.ver, r.on ? 1 : 0);
     iniSet(L"cb_radio.ini", L"Vehicles", k, v, true);
 }
 static bool loadVeh(int64_t id, VehRadio& r) {
@@ -184,8 +184,8 @@ static bool loadVeh(int64_t id, VehRadio& r) {
     std::wstring v = iniGet(L"cb_radio.ini", L"Vehicles", k);
     int a = 0, b = 0; unsigned c = 0;
     int n = swscanf(v.c_str(), L"%d,%d,%u", &a, &b, &c);
+    if (n >= 2 && a >= KHZ_MIN && a <= KHZ_MAX) { r.khz = snapKhz(a); r.ver = (uint32_t)b; r.on = n < 3 || c != 0; return true; }  // khz,ver[,on]
     if (n == 3) { r.khz = chKhz(a); r.ver = c; return r.khz != 0; }  // before frequencies: ch,code,ver
-    if (n == 2 && a >= KHZ_MIN && a <= KHZ_MAX) { r.khz = snapKhz(a); r.ver = (uint32_t)b; return true; }
     return false;
 }
 static std::string utf8(const std::wstring& w) {
@@ -575,8 +575,8 @@ static void scanWorld() {
         myVeh = id;
         if (id) {
             auto it = vehRadio.find(id);
-            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {cb.khz, 0}; it = vehRadio.emplace(id, r).first; }
-            cb.khz = it->second.khz;
+            if (it == vehRadio.end()) { VehRadio r; if (!loadVeh(id, r)) r = {cb.khz, 0, cb.on}; it = vehRadio.emplace(id, r).first; }
+            cb.khz = it->second.khz; cb.on = it->second.on;
             notice(label(cb.khz) + "  (this vehicle's CB)");
             helloNow = true;
         }
@@ -585,7 +585,7 @@ static void scanWorld() {
 }
 // under mu: a rig was retuned. The CB's frequency is its vehicle's (and the passengers'), the handheld's is ours.
 static void radioChanged(int r) {
-    if (r == CB && myVeh) { VehRadio& v = vehRadio[myVeh]; v.khz = rig[CB].khz; v.ver++; saveVeh(myVeh, v); helloNow = true; }
+    if (r == CB && myVeh) { VehRadio& v = vehRadio[myVeh]; v.khz = rig[CB].khz; v.on = rig[CB].on; v.ver++; saveVeh(myVeh, v); helloNow = true; }
     if (r == HT) footKhz = rig[HT].khz;
     saveSettings();
 }
@@ -662,7 +662,7 @@ static_assert(sizeof(HelloVeh) == 14, "hello vehicle block is 14 bytes");
 static const int HELLO = HEAD + (int)sizeof(HelloVeh);              // older plugins read only the head
 static void fillHello(Packet& p) {  // under mu
     HelloVeh h{myVeh, 0, 0};  // the vehicle we sit in
-    if (myVeh) { const VehRadio& r = vehRadio[myVeh]; h.khz = (uint16_t)r.khz; h.ver = r.ver; }
+    if (myVeh) { const VehRadio& r = vehRadio[myVeh]; h.khz = (uint16_t)(r.khz | (r.on ? 0 : 0x8000)); h.ver = r.ver; }  // bit 15: the CB is off
     memcpy(p.ulaw, &h, sizeof h);
 }
 static void sendTo(uint64_t sid, const Packet& p, int n) {
@@ -860,12 +860,14 @@ static void received(uint64_t from, const Packet& p, int n) {
         if (n >= HELLO) {
             HelloVeh h; memcpy(&h, p.ulaw, sizeof h);
             peerVeh[from] = h.veh;
-            if (h.veh && h.veh == myVeh && h.khz >= KHZ_MIN && h.khz <= KHZ_MAX) {  // someone in our vehicle: the newer setting wins
+            int hk = h.khz & 0x7fff; bool hon = !(h.khz & 0x8000);
+            if (h.veh && h.veh == myVeh && hk >= KHZ_MIN && hk <= KHZ_MAX) {  // someone in our vehicle: the newer setting wins
                 VehRadio& r = vehRadio[myVeh];
-                if (h.ver > r.ver || (h.ver == r.ver && h.khz != r.khz && from < mySid)) {
-                    r = {h.khz, h.ver}; saveVeh(myVeh, r);
-                    if (rig[CB].khz != h.khz) {
-                        int khz = rig[CB].khz = h.khz;
+                if (h.ver > r.ver || (h.ver == r.ver && (hk != r.khz || hon != r.on) && from < mySid)) {
+                    r = {hk, h.ver, hon}; saveVeh(myVeh, r);
+                    rig[CB].on = hon;
+                    if (rig[CB].khz != hk) {
+                        int khz = rig[CB].khz = hk;
                         std::string who; for (auto& pl : players) if (pl.sid == from) who = pl.name;
                         notice(label(khz) + "  (set by " + (who.empty() ? "a passenger" : who) + ")");
                     }
@@ -1214,7 +1216,7 @@ static bool apply(const std::string& q) {  // -> the radio was retuned (the clic
         else if (k == "mic") micGain = clamp(n, 10, 300);
         else if (k == "roger") roger = n ? 1 : 0;
         else if (k == "gamevoice") gameVoice = n ? 1 : 0;
-        else if (k == "power") rig[r].on = n != 0;
+        else if (k == "power") { bool was = rig[r].on; rig[r].on = n != 0; if (r == CB && was != rig[r].on) radioChanged(CB); }  // the vehicle's: passengers follow
         else if (k == "txmode") txMode = clamp(n, 0, 2);
         else if (k == "mode") panelMode = clamp(n, 0, 1);
         else if (k == "parrot") parrot = n ? 1 : 0;
