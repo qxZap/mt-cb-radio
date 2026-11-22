@@ -133,6 +133,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
  radial-gradient(120% 60% at 50% 0%,#2f2f33,#151517 70%),#151517;border:2px solid #000;box-shadow:0 30px 60px #000c,inset 0 2px 0 #ffffff14,inset 0 -6px 12px #000}
 .ht .ptt{position:absolute;left:-12px;top:120px;width:12px;height:90px;border-radius:6px 0 0 6px;background:linear-gradient(90deg,#3a3a3e,#1a1a1c);border:1px solid #000}
 .ht .ptt.on{background:linear-gradient(90deg,#ff5a3a,#a3200d)}
+#htKeys button.gvon{color:var(--amber);box-shadow:inset 0 0 0 2px var(--amber),0 0 8px var(--amber)}
 /* the power slide: a switch sticking out from behind the right side, pushed up for on */
 .ht .slide{position:absolute;right:-22px;top:100px;width:22px;height:112px;border-radius:0 9px 9px 0;background:linear-gradient(90deg,#060607,#1f1f23);border:1px solid #000;border-left:0;box-shadow:3px 3px 6px #000a;cursor:pointer}
 .ht .slide:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
@@ -161,7 +162,7 @@ select{font:inherit;background:#0f0f11;color:var(--ink);border:1px solid var(--e
 .ht .knobs{justify-content:center}
 /* a radio you are not at: heard, not tuned */
 .locked .tune,.locked #kCh,.locked .fin,.locked #tPw,#chansCard.locked .chb,#htKeys.locked,.knob.off2,.slide.off2{pointer-events:none;opacity:.32;filter:grayscale(1)}
-.pwroff .tune,.pwroff #kCh,.pwroff .fin,#chansCard.pwroff .chb,#htKeys.pwroff button:not([data-k=pw]){pointer-events:none;opacity:.32;filter:grayscale(1)}
+.pwroff .tune,.pwroff #kCh,.pwroff .fin,#chansCard.pwroff .chb,#htKeys.pwroff button{pointer-events:none;opacity:.32;filter:grayscale(1)}
 body.simple .ht .keys2{grid-template-columns:repeat(3,minmax(0,1fr))}
 .knob .kled{width:8px;height:8px;border-radius:50%;background:#2a0a07;box-shadow:inset 0 1px 1px #000}
 .knob.lit .kled{background:var(--seg);box-shadow:0 0 7px var(--seg)}
@@ -268,8 +269,8 @@ input,select{-webkit-user-select:text;user-select:text}
 <div id="htView" hidden><div class="htwrap"><div class="ht" id="htBody"><div class="off htoff" id="htOff" hidden>You don't own a ham radio yet.<br>Buy one at the tech store (Ham Radio, 1,500), then take it out once with its hotbar number.</div>
   <span class="ant" aria-hidden="true"></span>
   <div class="body"><span class="ptt" id="htPtt" aria-hidden="true"></span>
-    <div class="slide" id="htPower" title="Game voice: slide up and talking also keys the game's own voice chat (G), so the people around hear you in person" role="switch" tabindex="0" aria-checked="true" aria-label="Game voice"><span class="track"></span><span class="thumb"></span></div>
-    <span class="plbl pon" id="htOnL">GAME V</span><span class="plbl poff" id="htOffL">OFF</span>
+    <div class="slide" id="htPower" title="Power: slide up for on" role="switch" tabindex="0" aria-checked="true" aria-label="Handheld power"><span class="track"></span><span class="thumb"></span></div>
+    <span class="plbl pon" id="htOnL">ON</span><span class="plbl poff" id="htOffL">OFF</span>
     <div class="brand2">MOTORTOWN <b>HT-3</b></div>
     <div class="top"><div class="knob" id="kHtCh" title="Channel" tabindex="0" role="slider" aria-label="Handheld channel"></div><span class="led2" id="htLed"></span><div class="knob" id="kHtVol" title="Volume" tabindex="0" role="slider" aria-label="Volume"></div></div>
     <div class="grill" aria-hidden="true"></div>
@@ -465,7 +466,7 @@ function click(){try{actx=actx||new AudioContext();const o=actx.createOscillator
 document.addEventListener("pointerdown",e=>{const b=e.target.closest("button,.slide");if(!b||getComputedStyle(b).pointerEvents=="none")return;
  click();b.classList.remove("flash");void b.offsetWidth;b.classList.add("flash")});
 $("mSimple").onclick=()=>set("mode=1");$("mFull").onclick=()=>set("mode=0");
-$("htPower").onclick=()=>set("gamevoice="+(st.gamevoice?0:1));  // the slide is game voice (11-22): the ham is always on
+$("htPower").onclick=()=>set("rig=ht&power="+(st.ht.on?0:1));
 $("htPower").onkeydown=e=>{if(e.key==" "||e.key=="Enter"){e.preventDefault();$("htPower").click()}};
 $("vCb").onclick=()=>{view="cb";draw()};$("vHt").onclick=()=>{view="ht";draw()};
 for(const i of [0,1,2])$("tx"+i).onclick=()=>set("txmode="+i);
@@ -474,22 +475,23 @@ $("tPw").onclick=()=>set("rig=cb&power="+(st.cb.on?0:1));
 const kHtVol=knob($("kHtVol"),"Vol",0,150,5,x=>x+"%",debounce(x=>set("vol="+x),150),48);
 const kHtCh=knob($("kHtCh"),"Ch",1,40,1,x=>"CH "+x,debounce(x=>set("rig=ht&ch="+x),120),48);
 let entry="";
-const KEYS=[["&#9650;","up","o"],["&#9660;","dn","o"],["&minus;5k","m5","o"],["+5k","p5","o"],["1","1"],["2","2"],["3","3"],["PWR","pw","o"],["4","4"],["5","5"],["6","6"],["SQL+","sq+"],
+const KEYS=[["&#9650;","up","o"],["&#9660;","dn","o"],["&minus;5k","m5","o"],["+5k","p5","o"],["1","1"],["2","2"],["3","3"],["GV","gv","o"],["4","4"],["5","5"],["6","6"],["SQL+","sq+"],
  ["7","7"],["8","8"],["9","9"],["SQL&minus;","sq-"],["CLR","clr","o"],["0","0"],["ENT","ent","o"],["CHK","chk"]];
-const KTIP={up:"Next channel",dn:"Previous channel",m5:"Down 5 kHz",p5:"Up 5 kHz",pw:"Power",clr:"Clear the entry",ent:"Tune to the entry (a channel, or 5 digits of kHz)","sq+":"Squelch up","sq-":"Squelch down",chk:"Radio check"};
+const KTIP={up:"Next channel",dn:"Previous channel",m5:"Down 5 kHz",p5:"Up 5 kHz",gv:"Game voice: talking also keys the game's own voice chat (G), so the people around hear you in person",clr:"Clear the entry",ent:"Tune to the entry (a channel, or 5 digits of kHz)","sq+":"Squelch up","sq-":"Squelch down",chk:"Radio check"};
 for(const [t,k,c] of KEYS){const b=document.createElement("button");b.innerHTML=t;b.dataset.k=k;b.title=KTIP[k]||("Key "+k);if(c)b.className=c;if(/^(\d|clr|ent|sq\+|sq-|chk|m5|p5)$/.test(k))b.classList.add("adv");b.onclick=()=>htKey(k);$("htKeys").append(b)}
 function htKey(k){if(/^\d$/.test(k)){if(entry.length<5)entry+=k;draw();return}
  if(k=="clr"){entry="";draw();return}
  if(k=="ent"){if(entry.length==5)set("rig=ht&khz="+entry);else if(entry.length&&entry.length<=2)set("rig=ht&ch="+(+entry));entry="";return}
  if(k=="up"||k=="dn"){view="ht";stepCh(k=="up"?1:-1);return}
  if(k=="m5"||k=="p5")return set("rig=ht&step="+(k=="p5"?1:-1));
- if(k=="pw")return set("rig=ht&power="+(st.ht.on?0:1));
+ if(k=="gv")return set("gamevoice="+(st.gamevoice?0:1));
  if(k=="sq+"||k=="sq-")return set("sq="+Math.max(0,Math.min(95,st.sq+(k=="sq+"?5:-5))));
  if(k=="chk")return set("parrot="+(st.parrot?0:1))}
 function drawHt(s,R){const on=R.on&&R.avail,rx=(s.rx||[]).length?Math.max(...s.rx):0;
  $("htLcd").classList.toggle("dark",!on);
  $("htLed").className="led2"+(on&&s.tx&&(s.txOn&2)?" tx":on&&rx>0?" rx":"");$("htPtt").classList.toggle("on",!!(s.tx&&(s.txOn&2)));
- $("htPower").setAttribute("aria-checked",st.gamevoice?"true":"false");$("htOnL").classList.toggle("lit",!!st.gamevoice);$("htOffL").classList.toggle("lit",!st.gamevoice);$("htPower").classList.toggle("off2",!R.avail);
+ $("htPower").setAttribute("aria-checked",R.on?"true":"false");$("htOnL").classList.toggle("lit",!!R.on);$("htOffL").classList.toggle("lit",!R.on);
+ document.querySelector("#htKeys [data-k=gv]")?.classList.toggle("gvon",!!st.gamevoice);$("htPower").classList.toggle("off2",!R.avail);
  if(!kHtVol.busy())kHtVol.show(s.vol);if(!kHtCh.busy())kHtCh.show(R.ch||1);$("kHtCh").classList.toggle("off2",!(R.avail));
  [...$("htBars").children].forEach((e,i)=>e.classList.toggle("on",on&&i<Math.ceil(rx*5)));
  $("htTx").textContent=!on?"":s.tx&&(s.txOn&2)?"TX":rx>0?"RX":s.parrot?"CHK":"";

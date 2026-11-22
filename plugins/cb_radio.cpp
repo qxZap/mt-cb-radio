@@ -231,7 +231,7 @@ static void loadSettings() {
     txMode = iniInt(INI, L"Radio", L"Transmit", 0) % 3;
     carried = iniInt(INI, L"Radio", L"HaveHandheld", 0) != 0;
     panelMode = iniInt(INI, L"Panel", L"Mode", 0) ? 1 : 0;
-    rig[CB].on = iniInt(INI, L"Radio", L"CBOn", 1) != 0; rig[HT].on = true;  // no power switch on the ham any more (11-22: its slide is game voice)
+    rig[CB].on = iniInt(INI, L"Radio", L"CBOn", 1) != 0; rig[HT].on = iniInt(INI, L"Radio", L"HandheldOn", 1) != 0;
     volume = iniInt(INI, L"Radio", L"Volume", 80); squelchPct = iniInt(INI, L"Radio", L"Squelch", 8);
     micGain = iniInt(INI, L"Radio", L"MicGain", 100); roger = iniInt(INI, L"Radio", L"RogerBeep", 1);
     iniSet(INI, L"Radio", L"MicDevice", L""); iniSet(INI, L"Radio", L"SpeakerDevice", L"");
@@ -1214,7 +1214,7 @@ static bool apply(const std::string& q) {  // -> the radio was retuned (the clic
         else if (k == "mic") micGain = clamp(n, 10, 300);
         else if (k == "roger") roger = n ? 1 : 0;
         else if (k == "gamevoice") gameVoice = n ? 1 : 0;
-        else if (k == "power") { if (r == CB) rig[r].on = n != 0; }  // the ham is always on
+        else if (k == "power") rig[r].on = n != 0;
         else if (k == "txmode") txMode = clamp(n, 0, 2);
         else if (k == "mode") panelMode = clamp(n, 0, 1);
         else if (k == "parrot") parrot = n ? 1 : 0;
